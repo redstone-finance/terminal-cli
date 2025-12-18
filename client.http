@@ -1,0 +1,30 @@
+
+###
+GET https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/?file=GET https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/?file=binance/trade/2025/12/10/ada/binance_trades_2025-12-10_ada.parquet
+
+
+###
+
+###
+GET https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/?file=okx/trade/2025/03/21/ton_usdt/okx_trades_2025-03-21_ton_usdt.parquet
+x-Api-Key: demo_test_key_125
+
+###
+
+###
+GET https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/?file=binance/trade/2025/12/10/ada/binance_trades_2025-12-10_ada.parquet
+
+###
+
+
+###
+GET https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/?file=binance/trade/2025/12/01/ada/binance_trades_2025-12-01_ada.parquet
+x-Api-Key: demo
+
+###
+
+###
+GET https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/?file=binance/trade/2025/02/11/ada/binance_trades_2025-02-11_ada.parquet
+x-Api-Key: demo_test_key_125
+
+###

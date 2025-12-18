@@ -1,0 +1,134 @@
+version: "2"
+linters:
+  enable:
+    - asasalint 
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - cyclop
+    - copyloopvar
+    - decorder
+    - depguard
+    - dogsled
+    - dupword
+    - durationcheck
+    - embeddedstructfieldcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - gocritic
+    - gosec
+    - iface
+    - importas
+    - interfacebloat
+    - intrange
+    - makezero
+    - mirror
+    - misspell
+    - nilerr
+    - nilnesserr
+    - nilnil
+    # - nolintlint # It warns about our mapcheck linter so it's disabled
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - recvcheck
+    - rowserrcheck
+    - sqlclosecheck
+    - tagalign
+    - testifylint 
+    - thelper
+    - tparallel 
+    - unconvert  
+    - unparam
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - err113
+    # - whitespace
+    # - wsl_v5
+  settings:
+    cyclop:
+      max-complexity: 35
+      package-average: 8
+    gocritic:
+      disable-all: true
+      enabled-checks:
+        - mapKey
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022", "-ST1006", "-QF1008", "-ST1005"]
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    exhaustive:
+      # Program elements to check for exhaustiveness.
+      # Default: [ switch ]
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: true
+      ignore-enum-members: "reflect.+"
+
+    gosec:
+      # includes:
+      #   - G602
+      severity: high
+      excludes:
+        - G115
+        - G404
+    depguard:
+      rules:
+        main:
+          allow:
+            - $gostd
+            - golang.org/x/
+            - github.com/stretchr/testify
+            - github.com/redstone-finance
+            - github.com/aws/aws-sdk-go-v2
+            - google.golang.org/protobuf
+            - github.com/gin-gonic/gin
+            - github.com/gin-contrib/pprof
+            - github.com/quickfixgo/quickfix
+            - github.com/shopspring/decimal
+            - github.com/gammazero/workerpool
+            - github.com/gammazero/deque
+            - github.com/cenkalti/backoff
+            - github.com/coder/websocket
+            - github.com/coder/quartz
+            - github.com/go-resty/resty
+            - github.com/wamuir/graft/tensorflow
+            - go.uber.org/ratelimit
+            - github.com/influxdata/influxdb-client-go
+            - github.com/influxdata/line-protocol
+            - github.com/go-playground/validator
+            - github.com/ethereum/go-ethereum
+            - github.com/spf13/viper
+            - github.com/spf13/cobra
+            - github.com/goccy/go-yaml
+            - github.com/joho/godotenv
+            - github.com/sirupsen/logrus
+            - github.com/mholt/archives
+            - github.com/xitongsys/parquet-go
+            - github.com/go-viper/mapstructure
+            - github.com/schollz/progressbar
+            - github.com/iancoleman/strcase
+            - github.com/kaikodata/kaiko-go-sdk
+            - google.golang.org/grpc
+            - go/ast
+            - go/token
+            - go/types
+            - github.com/eclipse/paho.golang/paho
+            - github.com/eclipse/paho.golang/autopaho
+            - gonum.org/v1/gonum
+          deny:
+            - pkg: github.com/mitchellh/mapstructure
+              desc: "replaced with viper's fork"
