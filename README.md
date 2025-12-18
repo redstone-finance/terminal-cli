@@ -60,6 +60,13 @@ API_KEY=your_secret_key_here
 
 > **Note:** The `--tokens` flag requires the full pair name (e.g., `btc_usdt`, `eth_usdc`). Passing just `btc` will not match any files.
 
+### Output Directory
+
+Downloaded files are saved in the `downloads/` folder, created in the same directory where you run the CLI.
+The tool automatically organizes files by exchange and date:
+
+`./downloads/<exchange>/trade/YYYY/MM/DD/<token_pair>/...`
+
 ### Metadata Logic
 
 The CLI automatically selects the correct configuration file based on the date range:
