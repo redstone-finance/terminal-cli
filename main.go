@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,13 +18,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-//go:embed metadata/*.json
+//go:embed all:metadata
 var configFS embed.FS
 
 type Config map[string][]string
 
+type ConfigRule struct {
+	StartDate time.Time
+	Config    Config
+}
+
 var (
 	mode        string
+	dataType    string
 	exchanges   []string
 	tokens      []string
 	startDate   string
@@ -42,8 +49,8 @@ func main() {
 		Run:   run,
 	}
 
-	// Flags
 	rootCmd.Flags().StringVar(&mode, "mode", "day", "Data mode: day (default)")
+	rootCmd.Flags().StringVar(&dataType, "type", "trade", "Data type: trade (default), derivative")
 	rootCmd.Flags().StringSliceVar(&exchanges, "exchanges", []string{}, "Comma-separated list of exchanges (e.g. binance,bybit)")
 	rootCmd.Flags().StringSliceVar(&tokens, "tokens", []string{}, "Comma-separated list of token pairs (e.g. btc_usdt,eth_usdc)")
 	rootCmd.Flags().StringVar(&startDate, "start-date", "", "Start date (YYYY-MM-DD)")
@@ -85,9 +92,15 @@ func run(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	config1, _ := loadConfig("metadata/_2025_01_01.json")
-	config2, _ := loadConfig("metadata/_2025_10_02.json")
-	threshold, _ := time.Parse("2006-01-02", "2025-10-02")
+	configRules, err := loadConfigRules(dataType)
+	if err != nil {
+		pterm.Error.Printf("Failed to load metadata configurations: %v\n", err)
+		os.Exit(1)
+	}
+	if len(configRules) == 0 {
+		pterm.Error.Printf("No configuration files found in metadata/%s folder.\n", dataType)
+		os.Exit(1)
+	}
 
 	type Job struct {
 		Exchange string
@@ -98,24 +111,21 @@ func run(cmd *cobra.Command, args []string) {
 
 	curr := start
 	for !curr.After(end) {
-		var activeConfig Config
-		if curr.Before(threshold) {
-			activeConfig = config1
-		} else {
-			activeConfig = config2
-		}
+		activeConfig := getConfigForDate(configRules, curr)
 
-		for _, ex := range exchanges {
-			ex = strings.TrimSpace(ex)
-			if availablePairs, ok := activeConfig[ex]; ok {
-				for _, usrPair := range tokens {
-					usrPair = strings.TrimSpace(usrPair)
-					if contains(availablePairs, usrPair) {
-						jobs = append(jobs, Job{
-							Exchange: ex,
-							Pair:     usrPair,
-							Date:     curr,
-						})
+		if activeConfig != nil {
+			for _, ex := range exchanges {
+				ex = strings.TrimSpace(ex)
+				if availablePairs, ok := activeConfig[ex]; ok {
+					for _, usrPair := range tokens {
+						usrPair = strings.TrimSpace(usrPair)
+						if contains(availablePairs, usrPair) {
+							jobs = append(jobs, Job{
+								Exchange: ex,
+								Pair:     usrPair,
+								Date:     curr,
+							})
+						}
 					}
 				}
 			}
@@ -129,6 +139,7 @@ func run(cmd *cobra.Command, args []string) {
 	}
 
 	pterm.DefaultSection.Println("Job Summary")
+	pterm.Info.Printf("Type: %s\n", dataType)
 	pterm.Info.Printf("Found %d files to download.\n", len(jobs))
 	pterm.Info.Printf("Range: %s to %s\n", jobs[0].Date.Format("2006-01-02"), jobs[len(jobs)-1].Date.Format("2006-01-02"))
 
@@ -145,30 +156,37 @@ func run(cmd *cobra.Command, args []string) {
 	failCount := 0
 
 	for i, job := range jobs {
-		jobTitle := fmt.Sprintf("[%d/%d] %s %s %s", i+1, len(jobs), job.Exchange, job.Pair, job.Date.Format("2006-01-02"))
+		relPath := getRelativePath(job.Exchange, job.Pair, dataType, job.Date)
+		displayPath := filepath.Join("downloads", relPath)
 
-		spinner, _ := pterm.DefaultSpinner.Start("Fetching link for " + jobTitle)
+		jobLabel := fmt.Sprintf("[%d/%d] %s", i+1, len(jobs), displayPath)
 
-		dlURL, size, relPath, err := fetchDownloadLink(apiKey, job.Exchange, job.Pair, job.Date)
+		spinner, _ := pterm.DefaultSpinner.Start(jobLabel + " ... Fetching Link")
+
+		dlURL, size, err := fetchDownloadLink(apiKey, relPath)
 		if err != nil {
-			spinner.Fail(fmt.Sprintf("%s - %v", jobTitle, err))
+			spinner.Fail(fmt.Sprintf("%s - %v", jobLabel, err))
 			failCount++
 			continue
 		}
 
-		spinner.UpdateText("Downloading " + jobTitle)
+		spinner.RemoveWhenDone = true
+		_ = spinner.Stop()
 
-		err = downloadFileWithProgress(dlURL, relPath, size, spinner)
+		barTitle := fmt.Sprintf("%s %s", pterm.LightBlue("LOADING"), jobLabel)
+
+		err = downloadFileWithProgress(dlURL, relPath, size, barTitle)
+
 		if err != nil {
-			spinner.Fail(fmt.Sprintf("%s - Download Error: %v", jobTitle, err))
+			pterm.Error.Printf("%s - %v\n", jobLabel, err)
 			failCount++
 		} else {
-			spinner.Success(jobTitle + " - Saved")
+			sizeStr := pterm.Gray(fmt.Sprintf("(%.2f MB)", float64(size)/1024/1024))
+			pterm.Success.Printf("%s - Saved %s\n", jobLabel, sizeStr)
 			successCount++
 		}
 	}
 
-	pterm.Println()
 	pterm.Println()
 	pterm.Println()
 	pterm.DefaultHeader.
@@ -181,8 +199,56 @@ func run(cmd *cobra.Command, args []string) {
 		{"Success", fmt.Sprintf("%d", successCount)},
 		{"Failed", fmt.Sprintf("%d", failCount)},
 	}
-
 	pterm.DefaultTable.WithData(summaryTable).Render()
+}
+
+func loadConfigRules(dType string) ([]ConfigRule, error) {
+	dirPath := "metadata/" + dType
+	entries, err := configFS.ReadDir(dirPath)
+	if err != nil {
+		return nil, fmt.Errorf("could not read directory %s: %v", dirPath, err)
+	}
+
+	var rules []ConfigRule
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".json")
+		name = strings.TrimPrefix(name, "_")
+
+		date, err := time.Parse("2006_01_02", name)
+		if err != nil {
+			date, err = time.Parse("2006-01-02", name)
+			if err != nil {
+				continue
+			}
+		}
+
+		content, err := configFS.ReadFile(filepath.Join(dirPath, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var cfg Config
+		if err := json.Unmarshal(content, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid json in %s: %v", entry.Name(), err)
+		}
+		rules = append(rules, ConfigRule{StartDate: date, Config: cfg})
+	}
+
+	sort.Slice(rules, func(i, j int) bool {
+		return rules[i].StartDate.Before(rules[j].StartDate)
+	})
+	return rules, nil
+}
+
+func getConfigForDate(rules []ConfigRule, date time.Time) Config {
+	for i := len(rules) - 1; i >= 0; i-- {
+		if !date.Before(rules[i].StartDate) {
+			return rules[i].Config
+		}
+	}
+	return nil
 }
 
 func contains(slice []string, item string) bool {
@@ -194,16 +260,21 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-func loadConfig(path string) (Config, error) {
-	data, err := configFS.ReadFile(path)
-	if err != nil {
-		return nil, err
+func getRelativePath(exchange, pair, dType string, date time.Time) string {
+	y, m, d := date.Date()
+	dateStr := date.Format("2006-01-02")
+
+	var folderPart, filePart string
+	if dType == "trade" {
+		folderPart = "trade"
+		filePart = "trades"
+	} else {
+		folderPart = dType
+		filePart = dType
 	}
-	var c Config
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, err
-	}
-	return c, nil
+
+	return fmt.Sprintf("%s/%s/%04d/%02d/%02d/%s/%s_%s_%s_%s.parquet",
+		exchange, folderPart, y, m, d, pair, exchange, filePart, dateStr, pair)
 }
 
 type APIResponse struct {
@@ -214,17 +285,11 @@ type APIResponse struct {
 	Message     string `json:"message"`
 }
 
-func fetchDownloadLink(apiKey, exchange, pair string, date time.Time) (string, int64, string, error) {
-	y, m, d := date.Date()
-	dateStr := date.Format("2006-01-02")
-
-	relPath := fmt.Sprintf("%s/trade/%04d/%02d/%02d/%s/%s_trades_%s_%s.parquet",
-		exchange, y, m, d, pair, exchange, dateStr, pair)
-
+func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	baseURL := "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
 	req, err := http.NewRequest("GET", baseURL, nil)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, err
 	}
 
 	q := req.URL.Query()
@@ -238,7 +303,7 @@ func fetchDownloadLink(apiKey, exchange, pair string, date time.Time) (string, i
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, "", err
+		return "", 0, err
 	}
 	defer resp.Body.Close()
 
@@ -246,23 +311,23 @@ func fetchDownloadLink(apiKey, exchange, pair string, date time.Time) (string, i
 		var apiErr APIResponse
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
 		if apiErr.Message != "" {
-			return "", 0, "", errors.New(apiErr.Message)
+			return "", 0, errors.New(apiErr.Message)
 		}
 		if resp.StatusCode == 404 {
-			return "", 0, "", errors.New("file not found on server")
+			return "", 0, errors.New("file not found on server")
 		}
-		return "", 0, "", fmt.Errorf("api status %d", resp.StatusCode)
+		return "", 0, fmt.Errorf("api status %d", resp.StatusCode)
 	}
 
 	var successResp APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&successResp); err != nil {
-		return "", 0, "", fmt.Errorf("invalid json: %v", err)
+		return "", 0, fmt.Errorf("invalid json: %v", err)
 	}
 
-	return successResp.DownloadURL, successResp.FileSize, relPath, nil
+	return successResp.DownloadURL, successResp.FileSize, nil
 }
 
-func downloadFileWithProgress(url, relPath string, size int64, spinner *pterm.SpinnerPrinter) error {
+func downloadFileWithProgress(url, relPath string, size int64, barTitle string) error {
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
@@ -283,15 +348,13 @@ func downloadFileWithProgress(url, relPath string, size int64, spinner *pterm.Sp
 	}
 	defer file.Close()
 
-	spinner.Success("Link acquired")
+	p, _ := pterm.DefaultProgressbar.
+		WithTotal(int(size)).
+		WithTitle(barTitle).
+		WithRemoveWhenDone(true).
+		Start()
 
-	p, _ := pterm.DefaultProgressbar.WithTotal(int(size)).WithTitle("Downloading").Start()
-
-	proxyReader := &ProgressReader{
-		Reader: resp.Body,
-		Bar:    p,
-	}
-
+	proxyReader := &ProgressReader{Reader: resp.Body, Bar: p}
 	_, err = io.Copy(file, proxyReader)
 
 	_, _ = p.Stop()
