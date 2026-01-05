@@ -47,16 +47,17 @@ API_KEY=your_secret_key_here
 
 ### Options
 
-| Flag | Shorthand | Description | Required | Default |
-| --- | --- | --- | --- | --- |
-| `--exchanges` |  | Comma-separated list of exchanges (e.g., `binance,bybit`) | **Yes** |  |
-| `--tokens` |  | Comma-separated list of **full pairs** (e.g., `btc_usdt`) | **Yes** |  |
-| `--start-date` |  | Start date in `YYYY-MM-DD` format | **Yes** |  |
-| `--end-date` |  | End date in `YYYY-MM-DD` format | No | Same as start |
-| `--mode` |  | Data mode | No | `day` |
-| `--api-key` |  | Manual API key entry (overrides `.env`) | No |  |
-| `--yes` | `-y` | Skip confirmation prompts | No | `false` |
-| `--help` | `-h` | Show help message | No |  |
+| Flag           | Shorthand | Description                                               | Required | Default       |
+|----------------| --- |-----------------------------------------------------------| --- |---------------|
+| `--exchanges`  |  | Comma-separated list of exchanges (e.g., `binance,bybit`) | **Yes** |               |
+| `--tokens`     |  | Comma-separated list of **full pairs** (e.g., `btc_usdt`) | **Yes** |               |
+| `--start-date` |  | Start date in `YYYY-MM-DD` format                         | **Yes** |               |
+| `--end-date`   |  | End date in `YYYY-MM-DD` format                           | No | Same as start |
+| `--mode`       |  | Data mode                                                 | No | `day`         |
+| `--type`       |  | Data type (`trade`, `derivative`)                         | No | `trade`       |
+| `--api-key`    |  | Manual API key entry (overrides `.env`)                   | No |               |
+| `--yes`        | `-y` | Skip confirmation prompts                                 | No | `false`       |
+| `--help`       | `-h` | Show help message                                         | No |               |
 
 > **Note:** The `--tokens` flag requires the full pair name (e.g., `btc_usdt`, `eth_usdc`). Passing just `btc` will not match any files.
 
@@ -66,13 +67,6 @@ Downloaded files are saved in the `downloads/` folder, created in the same direc
 The tool automatically organizes files by exchange and date:
 
 `./downloads/<exchange>/trade/YYYY/MM/DD/<token_pair>/...`
-
-### Metadata Logic
-
-The CLI automatically selects the correct configuration file based on the date range:
-
-* **Pre-Oct 2025**: Uses `_2025_01_01.json` rules.
-* **Post-Oct 2025**: Uses `_2025_10_02.json` rules (cutoff date: 2025-10-02).
 
 ## Examples
 
