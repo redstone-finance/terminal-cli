@@ -1,0 +1,35 @@
+{
+  "hyperliquid": [
+    "perp:xyz:aapl_usd",
+    "perp:xyz:amzn_usd",
+    "perp:xyz:coin_usd",
+    "perp:xyz:gold_usd",
+    "perp:xyz:googl_usd",
+    "perp:xyz:hood_usd",
+    "perp:xyz:intc_usd",
+    "perp:xyz:meta_usd",
+    "perp:xyz:msft_usd",
+    "perp:xyz:nvda_usd",
+    "perp:xyz:orcl_usd",
+    "perp:xyz:pltr_usd",
+    "perp:xyz:tsla_usd",
+    "perp:xyz:xyz100_usd",
+    "perp:flx:xmr_usd",
+    "perp:flx:coin_usd",
+    "perp:flx:crcl_usd",
+    "perp:flx:gold_usd",
+    "perp:flx:silver_usd",
+    "perp:flx:tsla_usd",
+    "perp:vntl:anthropic_usd",
+    "perp:vntl:mag7_usd",
+    "perp:vntl:openai_usd",
+    "perp:vntl:spacex_usd",
+    "perp:hyna:btc_usd",
+    "perp:hyna:eth_usd",
+    "perp:hyna:hype_usd",
+    "perp:hyna:lit_usd",
+    "perp:hyna:sol_usd",
+    "perp:hyna:zec_usd"
+  ]
+
+}
