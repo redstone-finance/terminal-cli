@@ -51,7 +51,15 @@ func main() {
 		Use:   "terminal-cli",
 		Short: "Download crypto trade data from RedStone Terminal",
 		Long:  `A CLI tool to batch download trade data (Parquet) for specific exchanges and tokens.`,
-		Run:   run,
+		Example: `  # RedStone live prices (ticker data)
+  terminal-cli --type ticker --exchanges redstonelive --tokens btc_usd,eth_usd --start-date 2026-09-01 --end-date 2026-09-07
+
+  # Trades from several exchanges
+  terminal-cli --exchanges binance,bingx,cryptocom --tokens btc_usdt,eth_usdt --start-date 2026-09-01 --end-date 2026-09-07
+
+  # See what is available before downloading
+  terminal-cli --mode check --type ticker --start-date 2026-09-01`,
+		Run: run,
 	}
 
 	rootCmd.Flags().StringVar(&mode, "mode", "day", "Data mode: day, check")
