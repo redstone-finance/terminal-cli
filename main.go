@@ -102,6 +102,9 @@ func run(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	exchanges = normalize(exchanges)
+	tokens = normalize(tokens)
+
 	configRules, err := loadConfigRules(dataType)
 	if err != nil {
 		pterm.Error.Printf("Failed to load metadata configurations: %v\n", err)
@@ -293,10 +296,8 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 		activeConfig := getConfigForDate(configRules, curr)
 		if activeConfig != nil {
 			for _, ex := range exchanges {
-				ex = strings.TrimSpace(ex)
 				if availablePairs, ok := activeConfig[ex]; ok {
 					for _, usrPair := range tokens {
-						usrPair = strings.TrimSpace(usrPair)
 						if contains(availablePairs, usrPair) {
 							jobs = append(jobs, Job{
 								Exchange: ex,
@@ -512,6 +513,23 @@ func getConfigForDate(rules []ConfigRule, date time.Time) Config {
 		}
 	}
 	return nil
+}
+
+// pflag parses string slices with a CSV reader that keeps leading spaces, so
+// --exchanges "binance, bybit" yields [binance, " bybit"]. Duplicates matter
+// too: they used to produce two jobs writing the same file concurrently.
+func normalize(values []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func contains(slice []string, item string) bool {
