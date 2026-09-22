@@ -123,6 +123,10 @@ func run(cmd *cobra.Command, args []string) {
 		if apiKey == "" {
 			apiKey = os.Getenv("API_KEY")
 		}
+		if apiKey == "" {
+			pterm.Error.Println("\nMissing API key: pass --api-key, or set API_KEY in the environment or a .env file")
+			os.Exit(1)
+		}
 		runDayMode(start, end, configRules)
 	default:
 		pterm.Error.Printf("Unknown mode: %s. Supported modes: day, check\n", mode)
