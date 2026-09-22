@@ -600,15 +600,26 @@ func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return err
 	}
-	file, err := os.Create(fullPath)
+	// Download to a temporary file so an interrupted transfer never leaves a
+	// truncated .parquet that the "already exists" check would skip forever.
+	tmpPath := fullPath + ".part"
+	file, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
 	proxyReader := &ProgressReader{Reader: resp.Body, Bar: bar}
-	_, err = io.Copy(file, proxyReader)
-	return err
+	if _, err := io.Copy(file, proxyReader); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+
+	return os.Rename(tmpPath, fullPath)
 }
 
 type ProgressReader struct {
