@@ -333,7 +333,7 @@ func runDownloads(jobs []Job) {
 
 	for i := range jobs {
 		relPath := getRelativePath(jobs[i].Exchange, jobs[i].Pair, dataType, jobs[i].Date)
-		fullPath := filepath.Join("downloads", relPath)
+		fullPath := localPath(relPath)
 		jobLabel := fmt.Sprintf("[%d/%d] %s", jobs[i].Index, jobs[i].Total, fullPath)
 
 		bar, _ := pterm.DefaultProgressbar.
@@ -390,7 +390,7 @@ func runDownloads(jobs []Job) {
 
 func processJob(job Job, success, fail, skip *int64, mu *sync.Mutex) {
 	relPath := getRelativePath(job.Exchange, job.Pair, dataType, job.Date)
-	fullPath := filepath.Join("downloads", relPath)
+	fullPath := localPath(relPath)
 	jobLabel := fmt.Sprintf("[%d/%d] %s", job.Index, job.Total, fullPath)
 
 	errPrefix := pterm.Error.Prefix.Style.Sprint(pterm.Error.Prefix.Text)
@@ -519,6 +519,21 @@ func getRelativePath(exchange, pair, dType string, date time.Time) string {
 
 	return fmt.Sprintf("%s/%s/%04d/%02d/%02d/%s/%s_%s_%s_%s.parquet",
 		exchange, folderPart, y, m, d, pair, exchange, filePart, dateStr, pair)
+}
+
+// Windows rejects these in file and directory names; derivative pairs are all
+// of the form "perp:venue:base_quote". Only the local path is rewritten - the
+// API is still asked for the original relPath.
+const reservedPathChars = `<>:"|?*`
+
+func localPath(relPath string) string {
+	safe := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(reservedPathChars, r) {
+			return '_'
+		}
+		return r
+	}, relPath)
+	return filepath.Join("downloads", safe)
 }
 
 type APIResponse struct {
