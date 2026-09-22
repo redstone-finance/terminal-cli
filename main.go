@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -466,7 +467,9 @@ func loadConfigRules(dType string) ([]ConfigRule, error) {
 			}
 		}
 
-		content, err := configFS.ReadFile(filepath.Join(dirPath, entry.Name()))
+		// path.Join, not filepath.Join: io/fs paths are always slash-separated,
+		// so the backslashes filepath produces on Windows never resolve.
+		content, err := configFS.ReadFile(path.Join(dirPath, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
