@@ -1,1 +1,21 @@
 .codegraph/
+
+# Build output
+/bin/*
+/.gopath~/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Env
+.env
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
