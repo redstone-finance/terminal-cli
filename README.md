@@ -25,12 +25,18 @@ chmod +x terminal-cli
 
 ## Configuration
 
-You can provide an API Key via a `.env` file in the same directory as the binary, or pass it via flags.
+You can provide an API Key via the `REDSTONE_TERMINAL_API_KEY` environment variable, a `.env` file in the directory you run the CLI from, or the `--api-key` flag.
 
-**Create a `.env` file:**
+**Export it:**
 
 ```bash
-API_KEY=your_secret_key_here
+export REDSTONE_TERMINAL_API_KEY=your_secret_key_here
+```
+
+**Or create a `.env` file:**
+
+```bash
+REDSTONE_TERMINAL_API_KEY=your_secret_key_here
 
 ```
 
@@ -63,7 +69,7 @@ The CLI operates in two modes:
 | `--exchanges` |  | Comma-separated list of exchanges | **Yes** (for `day`) |  |
 | `--tokens` |  | Comma-separated list of **full pairs** | **Yes** (for `day`) |  |
 | `--parallel` | `-p` | Number of concurrent downloads | No | `10` |
-| `--api-key` |  | Manual API key entry (overrides `.env`) | No |  |
+| `--api-key` |  | API key (overrides `REDSTONE_TERMINAL_API_KEY`) | No |  |
 | `--yes` | `-y` | Skip confirmation prompts | No | `false` |
 | `--help` | `-h` | Show help message | No |  |
 
