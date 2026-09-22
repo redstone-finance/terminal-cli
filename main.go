@@ -329,8 +329,9 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 func runDownloads(jobs []Job) {
 	multi := pterm.DefaultMultiPrinter
-	multi.Start()
 
+	// Every writer must exist before Start: NewWriter appends to
+	// multi.buffers, which Start's 200ms render ticker then reads.
 	for i := range jobs {
 		relPath := getRelativePath(jobs[i].Exchange, jobs[i].Pair, dataType, jobs[i].Date)
 		fullPath := localPath(relPath)
@@ -344,6 +345,8 @@ func runDownloads(jobs []Job) {
 
 		jobs[i].Bar = bar
 	}
+
+	multi.Start()
 
 	jobsCh := make(chan Job, len(jobs))
 	var wg sync.WaitGroup
