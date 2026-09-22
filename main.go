@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -67,7 +69,6 @@ func main() {
 	}
 }
 
-// Job struct
 type Job struct {
 	Index    int
 	Total    int
@@ -96,7 +97,14 @@ func run(cmd *cobra.Command, args []string) {
 			pterm.Error.Printf("Invalid end date: %v\n", err)
 			os.Exit(1)
 		}
+		if end.Before(start) {
+			pterm.Error.Printf("--end-date (%s) is before --start-date (%s)\n", endDate, startDate)
+			os.Exit(1)
+		}
 	}
+
+	exchanges = normalize(exchanges)
+	tokens = normalize(tokens)
 
 	configRules, err := loadConfigRules(dataType)
 	if err != nil {
@@ -116,8 +124,16 @@ func run(cmd *cobra.Command, args []string) {
 			pterm.Error.Println("\nMode 'day' requires: --exchanges and --tokens")
 			os.Exit(1)
 		}
+		if parallelism < 1 {
+			pterm.Error.Printf("--parallel must be at least 1, got %d\n", parallelism)
+			os.Exit(1)
+		}
 		if apiKey == "" {
 			apiKey = os.Getenv("API_KEY")
+		}
+		if apiKey == "" {
+			pterm.Error.Println("\nMissing API key: pass --api-key, or set API_KEY in the environment or a .env file")
+			os.Exit(1)
 		}
 		runDayMode(start, end, configRules)
 	default:
@@ -149,13 +165,13 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 
 		if activeConfig != nil {
 			for ex, pairs := range activeConfig {
-				if len(exchanges) > 0 && !contains(exchanges, ex) {
+				if len(exchanges) > 0 && !slices.Contains(exchanges, ex) {
 					continue
 				}
 
 				var validPairs []string
 				for _, pair := range pairs {
-					if len(tokens) > 0 && !contains(tokens, pair) {
+					if len(tokens) > 0 && !slices.Contains(tokens, pair) {
 						continue
 					}
 					validPairs = append(validPairs, pair)
@@ -174,7 +190,7 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 				currentBlock = &AvailabilityBlock{Start: curr, End: curr, Data: dayData}
 			}
 		} else {
-			if isDataEqual(currentBlock.Data, dayData) {
+			if maps.EqualFunc(currentBlock.Data, dayData, slices.Equal) {
 				currentBlock.End = curr
 			} else {
 				blocks = append(blocks, *currentBlock)
@@ -218,7 +234,6 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 
 			tableData = append(tableData, []string{ex, tokensStr})
 
-			// Add an empty separator row between entries (except the last one)
 			if i < len(sortedExs)-1 {
 				tableData = append(tableData, []string{"", ""})
 			}
@@ -253,27 +268,6 @@ func wordWrap(text string, lineWidth int) string {
 	return wrapped
 }
 
-func isDataEqual(a, b map[string][]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, vA := range a {
-		vB, ok := b[k]
-		if !ok {
-			return false
-		}
-		if len(vA) != len(vB) {
-			return false
-		}
-		for i := range vA {
-			if vA[i] != vB[i] {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func runDayMode(start, end time.Time, configRules []ConfigRule) {
 	var jobs []Job
 	curr := start
@@ -281,11 +275,9 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 		activeConfig := getConfigForDate(configRules, curr)
 		if activeConfig != nil {
 			for _, ex := range exchanges {
-				ex = strings.TrimSpace(ex)
 				if availablePairs, ok := activeConfig[ex]; ok {
 					for _, usrPair := range tokens {
-						usrPair = strings.TrimSpace(usrPair)
-						if contains(availablePairs, usrPair) {
+						if slices.Contains(availablePairs, usrPair) {
 							jobs = append(jobs, Job{
 								Exchange: ex,
 								Pair:     usrPair,
@@ -502,13 +494,21 @@ func getConfigForDate(rules []ConfigRule, date time.Time) Config {
 	return nil
 }
 
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
+// pflag parses string slices with a CSV reader that keeps leading spaces, so
+// --exchanges "binance, bybit" yields [binance, " bybit"]. Duplicates matter
+// too: they used to produce two jobs writing the same file concurrently.
+func normalize(values []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
 		}
+		seen[v] = true
+		out = append(out, v)
 	}
-	return false
+	return out
 }
 
 func getRelativePath(exchange, pair, dType string, date time.Time) string {
@@ -576,8 +576,11 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	if resp.StatusCode != 200 {
 		var apiErr APIResponse
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
-		if apiErr.Message != "" {
-			return "", 0, errors.New(apiErr.Message)
+		// The gateway uses "message" for some failures and "error" for others.
+		for _, msg := range []string{apiErr.Message, apiErr.Error} {
+			if msg != "" {
+				return "", 0, errors.New(msg)
+			}
 		}
 		if resp.StatusCode == 404 {
 			return "", 0, errors.New("file not found on server")
