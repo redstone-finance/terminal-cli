@@ -606,8 +606,11 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	if resp.StatusCode != 200 {
 		var apiErr APIResponse
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
-		if apiErr.Message != "" {
-			return "", 0, errors.New(apiErr.Message)
+		// The gateway uses "message" for some failures and "error" for others.
+		for _, msg := range []string{apiErr.Message, apiErr.Error} {
+			if msg != "" {
+				return "", 0, errors.New(msg)
+			}
 		}
 		if resp.StatusCode == 404 {
 			return "", 0, errors.New("file not found on server")
