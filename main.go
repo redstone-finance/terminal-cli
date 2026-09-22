@@ -116,6 +116,10 @@ func run(cmd *cobra.Command, args []string) {
 			pterm.Error.Println("\nMode 'day' requires: --exchanges and --tokens")
 			os.Exit(1)
 		}
+		if parallelism < 1 {
+			pterm.Error.Printf("--parallel must be at least 1, got %d\n", parallelism)
+			os.Exit(1)
+		}
 		if apiKey == "" {
 			apiKey = os.Getenv("API_KEY")
 		}
