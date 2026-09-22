@@ -626,15 +626,28 @@ func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
 	return os.Rename(tmpPath, fullPath)
 }
 
+// Every Bar.Add re-renders the bar into its multi-printer buffer, which is
+// never truncated: at one render per 32KB read a 1GB file left ~10MB of ANSI
+// behind, and the multi-printer re-scans every buffer 5 times a second.
+const progressUpdateInterval = 100 * time.Millisecond
+
 type ProgressReader struct {
 	Reader io.Reader
 	Bar    *pterm.ProgressbarPrinter
+
+	pending    int
+	lastUpdate time.Time
 }
 
 func (pr *ProgressReader) Read(p []byte) (int, error) {
 	n, err := pr.Reader.Read(p)
-	if n > 0 && pr.Bar != nil {
-		pr.Bar.Add(n)
+	pr.pending += n
+
+	if pr.Bar != nil && pr.pending > 0 && (err != nil || time.Since(pr.lastUpdate) >= progressUpdateInterval) {
+		pr.Bar.Add(pr.pending)
+		pr.pending = 0
+		pr.lastUpdate = time.Now()
 	}
+
 	return n, err
 }
