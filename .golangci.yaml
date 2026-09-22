@@ -119,7 +119,7 @@ linters:
             - github.com/mholt/archives
             - github.com/xitongsys/parquet-go
             - github.com/go-viper/mapstructure
-            - github.com/schollz/progressbar
+            - github.com/pterm/pterm
             - github.com/iancoleman/strcase
             - github.com/kaikodata/kaiko-go-sdk
             - google.golang.org/grpc
