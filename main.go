@@ -51,7 +51,10 @@ func main() {
 		Use:   "terminal-cli",
 		Short: "Download crypto trade data from RedStone Terminal",
 		Long:  `A CLI tool to batch download trade data (Parquet) for specific exchanges and tokens.`,
-		Example: `  # RedStone live prices (ticker data)
+		Example: `  # API key (or put it in a .env file)
+  export REDSTONE_TERMINAL_API_KEY=your_secret_key_here
+
+  # RedStone live prices (ticker data)
   terminal-cli --type ticker --exchanges redstonelive --tokens btc_usd,eth_usd --start-date 2026-09-01 --end-date 2026-09-07
 
   # Trades from several exchanges
@@ -69,7 +72,7 @@ func main() {
 	rootCmd.Flags().StringVar(&startDate, "start-date", "", "Start date (YYYY-MM-DD)")
 	rootCmd.Flags().StringVar(&endDate, "end-date", "", "End date (YYYY-MM-DD)")
 	rootCmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompts")
-	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API Key (overrides API_KEY env var)")
+	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API Key (overrides REDSTONE_TERMINAL_API_KEY env var)")
 	rootCmd.Flags().IntVarP(&parallelism, "parallel", "p", 10, "Number of parallel downloads")
 
 	if err := rootCmd.Execute(); err != nil {
@@ -137,10 +140,10 @@ func run(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		if apiKey == "" {
-			apiKey = os.Getenv("API_KEY")
+			apiKey = os.Getenv("REDSTONE_TERMINAL_API_KEY")
 		}
 		if apiKey == "" {
-			pterm.Error.Println("\nMissing API key: pass --api-key, or set API_KEY in the environment or a .env file")
+			pterm.Error.Println("\nMissing API key: pass --api-key, or set REDSTONE_TERMINAL_API_KEY in the environment or a .env file")
 			os.Exit(1)
 		}
 		runDayMode(start, end, configRules)
