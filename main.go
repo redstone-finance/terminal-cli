@@ -593,8 +593,14 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	return successResp.DownloadURL, successResp.FileSize, nil
 }
 
+// http.DefaultClient has no timeout, so a stalled S3 connection would hang a
+// worker (and, at -p 1, the whole CLI) forever.
+// Whole-request cap rather than an idle-read deadline; raise it if single
+// files ever outgrow it.
+var downloadClient = &http.Client{Timeout: 30 * time.Minute}
+
 func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
-	resp, err := http.Get(url)
+	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return err
 	}
