@@ -96,6 +96,10 @@ func run(cmd *cobra.Command, args []string) {
 			pterm.Error.Printf("Invalid end date: %v\n", err)
 			os.Exit(1)
 		}
+		if end.Before(start) {
+			pterm.Error.Printf("--end-date (%s) is before --start-date (%s)\n", endDate, startDate)
+			os.Exit(1)
+		}
 	}
 
 	configRules, err := loadConfigRules(dataType)
