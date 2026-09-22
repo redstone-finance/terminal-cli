@@ -423,7 +423,11 @@ func processJob(job Job, success, fail, skip *int64, mu *sync.Mutex) {
 	}
 
 	bar.UpdateTitle(fmt.Sprintf("%s %s", pterm.LightBlue("LOADING"), jobLabel))
-	bar.Total = int(size)
+	// +1 keeps the bar out of pterm's two dead states: Total==0 renders an
+	// empty string (the job's row vanishes), and Current==Total auto-stops the
+	// bar, after which UpdateTitle also renders an empty string and the final
+	// "Saved" line is never shown.
+	bar.Total = int(size) + 1
 
 	err = downloadStream(dlURL, fullPath, bar)
 
