@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # caches below are keyed by hand - setup-go only saves on a key miss, which
+          # freezes its build cache at whenever go.sum last changed
+          cache: false
+
+      # CI runs only on PRs, so each cache is scoped to its PR: it speeds up later pushes, not other PRs
+      - name: Cache Go module cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .gopath~/pkg/mod
+          key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            gomod-${{ runner.os }}-
+
+      - name: Cache Go tool binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .gopath~/bin
+          # no restore-keys: make treats any restored golangci-lint as up to date, whatever its
+          # version; go.mod is in the key because the linter must be built with the project's Go
+          key: gobin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+
+      - name: Cache Go build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}-
+
+      - name: Cache golangci-lint analysis
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/golangci-lint
+          key: golangci-${{ runner.os }}-${{ hashFiles('.golangci.yaml', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-${{ runner.os }}-${{ hashFiles('.golangci.yaml', 'go.sum') }}-
+            golangci-${{ runner.os }}-
+
+      - name: Build
+        run: make build-all
+
+      # main has pre-existing issues; only fail on ones this PR introduces
+      - name: Lint
+        run: make lint LINT_FLAGS="--new-from-merge-base=origin/$GITHUB_BASE_REF"
