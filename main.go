@@ -81,12 +81,9 @@ func main() {
 }
 
 type Job struct {
-	Index    int
-	Total    int
 	Exchange string
 	Pair     string
 	Date     time.Time
-	Bar      *pterm.ProgressbarPrinter
 }
 
 func run(cmd *cobra.Command, args []string) {
@@ -307,16 +304,15 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 		return
 	}
 
-	for i := range jobs {
-		jobs[i].Index = i + 1
-		jobs[i].Total = len(jobs)
-	}
-
 	pterm.DefaultSection.Println("Job Summary")
 	pterm.Info.Printf("Type: %s\n", dataType)
 	pterm.Info.Printf("Count: %d files\n", len(jobs))
 	pterm.Info.Printf("Concurrency: %d\n", parallelism)
 	pterm.Info.Printf("Range: %s to %s\n", jobs[0].Date.Format("2006-01-02"), jobs[len(jobs)-1].Date.Format("2006-01-02"))
+
+	if today := time.Now().UTC().Truncate(24 * time.Hour); !jobs[len(jobs)-1].Date.Before(today) {
+		pterm.Warning.Println("Range reaches today: today's files are usually not published yet")
+	}
 
 	if !skipConfirm {
 		result, _ := pterm.DefaultInteractiveConfirm.Show("Do you want to continue?")
@@ -330,39 +326,42 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 	runDownloads(jobs)
 }
 
+type outcome int
+
+const (
+	saved outcome = iota
+	skipped
+	missing
+	failed
+)
+
 func runDownloads(jobs []Job) {
-	multi := pterm.DefaultMultiPrinter
-
-	// Every writer must exist before Start: NewWriter appends to
-	// multi.buffers, which Start's 200ms render ticker then reads.
-	for i := range jobs {
-		relPath := getRelativePath(jobs[i].Exchange, jobs[i].Pair, dataType, jobs[i].Date)
-		fullPath := localPath(relPath)
-		jobLabel := fmt.Sprintf("[%d/%d] %s", jobs[i].Index, jobs[i].Total, fullPath)
-
-		bar, _ := pterm.DefaultProgressbar.
-			WithWriter(multi.NewWriter()).
-			WithTotal(100).
-			WithTitle(fmt.Sprintf("%s ... Pending", jobLabel)).
-			Start()
-
-		jobs[i].Bar = bar
-	}
-
-	multi.Start()
+	bar, _ := pterm.DefaultProgressbar.
+		WithTotal(len(jobs)).
+		WithTitle("Downloading").
+		WithShowElapsedTime(false).
+		WithRemoveWhenDone(true).
+		Start()
 
 	jobsCh := make(chan Job, len(jobs))
 	var wg sync.WaitGroup
-
-	var successCount, failCount, skipCount int64
 	var mu sync.Mutex
+	var counts [failed + 1]int
 
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range jobsCh {
-				processJob(job, &successCount, &failCount, &skipCount, &mu)
+				o, line := processJob(job)
+				// Serialised: pterm's print-over-active-bar redraw is not goroutine safe.
+				mu.Lock()
+				counts[o]++
+				if line != "" {
+					pterm.Println(line)
+				}
+				bar.Increment()
+				mu.Unlock()
 			}
 		}()
 	}
@@ -373,85 +372,50 @@ func runDownloads(jobs []Job) {
 	close(jobsCh)
 
 	wg.Wait()
-	multi.Stop()
+	_, _ = bar.Stop()
 
 	pterm.Println()
-	pterm.DefaultHeader.
-		WithBackgroundStyle(pterm.NewStyle(pterm.BgGreen)).
-		WithTextStyle(pterm.NewStyle(pterm.FgBlack)).
-		Println("Finished")
-
-	row := func(label string, val int64, style *pterm.Style) []string {
-		return []string{style.Sprint(label), style.Sprint(fmt.Sprintf("%d", val))}
+	row := func(label string, val int, style *pterm.Style) []string {
+		return []string{style.Sprint(label), style.Sprint(val)}
 	}
+	_ = pterm.DefaultTable.WithData(pterm.TableData{
+		row("Total", len(jobs), pterm.NewStyle(pterm.FgLightBlue)),
+		row("Saved", counts[saved], pterm.NewStyle(pterm.FgGreen)),
+		row("Skipped", counts[skipped], pterm.NewStyle(pterm.FgYellow)),
+		row("Missing", counts[missing], pterm.NewStyle(pterm.FgYellow)),
+		row("Failed", counts[failed], pterm.NewStyle(pterm.FgRed)),
+	}).Render()
 
-	summaryTable := pterm.TableData{
-		row("Total", int64(len(jobs)), pterm.NewStyle(pterm.FgLightBlue)),
-		row("Success", successCount, pterm.NewStyle(pterm.FgGreen)),
-		row("Skipped", skipCount, pterm.NewStyle(pterm.FgYellow)),
-		row("Failed", failCount, pterm.NewStyle(pterm.FgRed)),
+	if counts[failed] > 0 {
+		os.Exit(1)
 	}
-	pterm.DefaultTable.WithData(summaryTable).Render()
 }
 
-func processJob(job Job, success, fail, skip *int64, mu *sync.Mutex) {
+// An empty line means nothing to log (skipped).
+func processJob(job Job) (outcome, string) {
 	relPath := getRelativePath(job.Exchange, job.Pair, dataType, job.Date)
 	fullPath := localPath(relPath)
-	jobLabel := fmt.Sprintf("[%d/%d] %s", job.Index, job.Total, fullPath)
-
-	errPrefix := pterm.Error.Prefix.Style.Sprint(pterm.Error.Prefix.Text)
-	okPrefix := pterm.Success.Prefix.Style.Sprint(pterm.Success.Prefix.Text)
-	skipPrefix := pterm.Warning.Prefix.Style.Sprint(pterm.Warning.Prefix.Text)
-
-	bar := job.Bar
+	label := fmt.Sprintf("%s %s %s", job.Date.Format("2006-01-02"), job.Exchange, job.Pair)
 
 	if _, err := os.Stat(fullPath); err == nil {
-		bar.UpdateTitle(fmt.Sprintf("%s %s - Skipped (Exists)", skipPrefix, jobLabel))
-		bar.Total = 1
-		bar.Increment()
-		_, _ = bar.Stop()
-
-		mu.Lock()
-		*skip++
-		mu.Unlock()
-		return
+		return skipped, ""
 	}
 
-	bar.UpdateTitle(fmt.Sprintf("%s %s ... Fetching", pterm.LightBlue("LOADING"), jobLabel))
+	started := time.Now()
 	dlURL, size, err := fetchDownloadLink(apiKey, relPath)
+	if errors.Is(err, errNotFound) {
+		return missing, pterm.Warning.Sprintf("%s  %v", label, err)
+	}
 	if err != nil {
-		bar.UpdateTitle(fmt.Sprintf("%s %s - Error: %v", errPrefix, jobLabel, err))
-		_, _ = bar.Stop()
-		mu.Lock()
-		*fail++
-		mu.Unlock()
-		return
+		return failed, pterm.Error.Sprintf("%s  %v", label, err)
 	}
 
-	bar.UpdateTitle(fmt.Sprintf("%s %s", pterm.LightBlue("LOADING"), jobLabel))
-	// +1 keeps the bar out of pterm's two dead states: Total==0 renders an
-	// empty string (the job's row vanishes), and Current==Total auto-stops the
-	// bar, after which UpdateTitle also renders an empty string and the final
-	// "Saved" line is never shown.
-	bar.Total = int(size) + 1
-
-	err = downloadStream(dlURL, fullPath, bar)
-
-	if err != nil {
-		bar.UpdateTitle(fmt.Sprintf("%s %s - Failed: %v", errPrefix, jobLabel, err))
-		_, _ = bar.Stop()
-		mu.Lock()
-		*fail++
-		mu.Unlock()
-	} else {
-		sizeStr := pterm.Gray(fmt.Sprintf("(%.2f MB)", float64(size)/1024/1024))
-		successMsg := fmt.Sprintf("%s %s - Saved %s", okPrefix, jobLabel, sizeStr)
-		bar.UpdateTitle(successMsg)
-		_, _ = bar.Stop()
-		mu.Lock()
-		*success++
-		mu.Unlock()
+	if err := downloadStream(dlURL, fullPath); err != nil {
+		return failed, pterm.Error.Sprintf("%s  %v", label, err)
 	}
+	return saved, pterm.Success.Sprintf("%s  %s  %s", label,
+		pterm.Gray(fmt.Sprintf("%.2f MB", float64(size)/1024/1024)),
+		pterm.Gray(time.Since(started).Round(100*time.Millisecond)))
 }
 
 func loadConfigRules(dType string) ([]ConfigRule, error) {
@@ -562,6 +526,11 @@ type APIResponse struct {
 	Message     string `json:"message"`
 }
 
+var (
+	errNotFound = errors.New("not found on server")
+	errAPI      = errors.New("api error")
+)
+
 func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	baseURL := "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
 	req, err := http.NewRequest("GET", baseURL, nil)
@@ -584,19 +553,25 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		var apiErr APIResponse
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
 		// The gateway uses "message" for some failures and "error" for others.
-		for _, msg := range []string{apiErr.Message, apiErr.Error} {
-			if msg != "" {
-				return "", 0, errors.New(msg)
+		msg := fmt.Sprintf("status %d", resp.StatusCode)
+		for _, m := range []string{apiErr.Message, apiErr.Error} {
+			if m != "" {
+				msg = m
+				break
 			}
 		}
-		if resp.StatusCode == 404 {
-			return "", 0, errors.New("file not found on server")
+		if resp.StatusCode == http.StatusNotFound {
+			// The gateway's usual message just echoes the path we asked for.
+			if msg == "File not found: "+relPath {
+				return "", 0, errNotFound
+			}
+			return "", 0, fmt.Errorf("%w: %s", errNotFound, msg)
 		}
-		return "", 0, fmt.Errorf("api status %d", resp.StatusCode)
+		return "", 0, fmt.Errorf("%w: %s", errAPI, msg)
 	}
 
 	var successResp APIResponse
@@ -613,7 +588,7 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 // files ever outgrow it.
 var downloadClient = &http.Client{Timeout: 30 * time.Minute}
 
-func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
+func downloadStream(url, fullPath string) error {
 	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return err
@@ -635,8 +610,7 @@ func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
 		return err
 	}
 
-	proxyReader := &ProgressReader{Reader: resp.Body, Bar: bar}
-	if _, err := io.Copy(file, proxyReader); err != nil {
+	if _, err := io.Copy(file, resp.Body); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmpPath)
 		return err
@@ -647,30 +621,4 @@ func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
 	}
 
 	return os.Rename(tmpPath, fullPath)
-}
-
-// Every Bar.Add re-renders the bar into its multi-printer buffer, which is
-// never truncated: at one render per 32KB read a 1GB file left ~10MB of ANSI
-// behind, and the multi-printer re-scans every buffer 5 times a second.
-const progressUpdateInterval = 100 * time.Millisecond
-
-type ProgressReader struct {
-	Reader io.Reader
-	Bar    *pterm.ProgressbarPrinter
-
-	pending    int
-	lastUpdate time.Time
-}
-
-func (pr *ProgressReader) Read(p []byte) (int, error) {
-	n, err := pr.Reader.Read(p)
-	pr.pending += n
-
-	if pr.Bar != nil && pr.pending > 0 && (err != nil || time.Since(pr.lastUpdate) >= progressUpdateInterval) {
-		pr.Bar.Add(pr.pending)
-		pr.pending = 0
-		pr.lastUpdate = time.Now()
-	}
-
-	return n, err
 }

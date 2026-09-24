@@ -20,7 +20,7 @@ func TestDownloadStreamLeavesNoFileOnFailure(t *testing.T) {
 	defer srv.Close()
 
 	fullPath := filepath.Join(t.TempDir(), "x.parquet")
-	if err := downloadStream(srv.URL, fullPath, nil); err == nil {
+	if err := downloadStream(srv.URL, fullPath); err == nil {
 		t.Fatal("expected an error from the aborted transfer")
 	}
 	for _, p := range []string{fullPath, fullPath + ".part"} {
@@ -37,7 +37,7 @@ func TestDownloadStreamWritesFileOnSuccess(t *testing.T) {
 	defer srv.Close()
 
 	fullPath := filepath.Join(t.TempDir(), "nested", "x.parquet")
-	if err := downloadStream(srv.URL, fullPath, nil); err != nil {
+	if err := downloadStream(srv.URL, fullPath); err != nil {
 		t.Fatalf("downloadStream: %v", err)
 	}
 	got, err := os.ReadFile(fullPath)
