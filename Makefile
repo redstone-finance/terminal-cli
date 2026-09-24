@@ -27,7 +27,7 @@ ASMFLAGS =
 GOFLAGS = -trimpath -buildvcs=false
 OUTDIR  = bin
 
-build: | $(BASE)
+build: | $(BASE) $(OUTDIR)
 	$Q cd $(BASE) && CGO_ENABLED=0 $(GO) build \
 		$(GOFLAGS) \
 		-tags "release,goexperiment.jsonv2" \
@@ -42,6 +42,8 @@ all:  build lint | $(BASE); $(info $(M) built and lint everything!) @
 $(BASE): ; $(info $(M) setting GOPATH…)
 	@mkdir -p $(dir $@)
 	@ln -sf $(CURDIR) $@
+$(OUTDIR):
+	@mkdir -p $@
 
 # External tools 
 $(BIN):
@@ -57,33 +59,21 @@ $(BIN)/golangci-lint:
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOPATH)/bin v2.6.0
 
 # Build targets
-.PHONY: build-all build-windows build-linux-amd64 build-darwin-arm64
+PLATFORMS     = linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64
+BUILD_TARGETS = $(addprefix build-,$(PLATFORMS))
 
-build-all: build-windows build-linux-amd64 build-darwin-arm64
+.PHONY: build-all $(BUILD_TARGETS)
 
-build-windows: | $(BASE)
+build-all: $(BUILD_TARGETS)
+
+# Outputs bin/terminal-cli-<os>-<arch>[.exe]
+$(BUILD_TARGETS): build-%: | $(BASE) $(OUTDIR)
 	$Q cd $(BASE) && \
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build \
+	GOOS=$(word 1,$(subst -, ,$*)) GOARCH=$(word 2,$(subst -, ,$*)) CGO_ENABLED=0 $(GO) build \
 		$(GOFLAGS) \
 		-tags "release,goexperiment.jsonv2" \
 		-ldflags '$(LDFLAGS)' \
-		-o $(OUTDIR)/windows_amd64/$(PACKAGE).exe main.go
-
-build-linux-amd64: | $(BASE)
-	$Q cd $(BASE) && \
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GO) build \
-		$(GOFLAGS) \
-		-tags "release,goexperiment.jsonv2" \
-		-ldflags '$(LDFLAGS)' \
-		-o $(OUTDIR)/linux_amd64/$(PACKAGE) main.go
-
-build-darwin-arm64: | $(BASE)
-	$Q cd $(BASE) && \
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GO) build \
-		$(GOFLAGS) \
-		-tags "release,goexperiment.jsonv2" \
-		-ldflags '$(LDFLAGS)' \
-		-o $(OUTDIR)/darwin_arm64/$(PACKAGE) main.go
+		-o $(OUTDIR)/$(PACKAGE)-$*$(if $(filter windows-%,$*),.exe) main.go
 
 .PHONY: lint
 lint: $(GOLANGCILINT) | $(BASE) ; $(info $(M) running golangci-lint) @
