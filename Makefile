@@ -50,13 +50,12 @@ $(BIN):
 	@mkdir -p $@
 $(BIN)/%: | $(BIN) ; $(info $(M) installing $(REPOSITORY)…)
 	$Q tmp=$$(mktemp -d); \
-	   env GO111MODULE=on GOPATH=$$tmp GOBIN=$(BIN) $(GO) install $(REPOSITORY) \
+	   env GO111MODULE=on GOPATH=$$tmp GOCACHE=$$tmp/cache GOBIN=$(BIN) $(GO) install $(REPOSITORY) \
 		|| ret=$$?; \
 	   exit $$ret
 
 GOLANGCILINT = $(BIN)/golangci-lint
-$(BIN)/golangci-lint:
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOPATH)/bin v2.6.0
+$(BIN)/golangci-lint: REPOSITORY=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 
 # Build targets
 PLATFORMS     = linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 windows-arm64
