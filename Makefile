@@ -21,7 +21,7 @@ ESC     := \033
 BOLD    := $(ESC)[1m
 RESET   := $(ESC)[0m
 
-LDFLAGS = -s -w -buildid=
+LDFLAGS = -s -w -buildid= -X main.version=$(VERSION)
 GCFLAGS =
 ASMFLAGS =
 GOFLAGS = -trimpath -buildvcs=false

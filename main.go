@@ -44,6 +44,9 @@ var (
 	parallelism int
 )
 
+// Set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	_ = godotenv.Load()
 
@@ -62,7 +65,8 @@ func main() {
 
   # See what is available before downloading
   terminal-cli --mode check --type ticker --start-date 2026-09-01`,
-		Run: run,
+		Run:     run,
+		Version: version,
 	}
 
 	rootCmd.Flags().StringVar(&mode, "mode", "day", "Data mode: day, check")
