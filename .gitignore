@@ -1,5 +1,5 @@
 .codegraph/
 .gopath~/
 .claude/worktrees/
-/bin/terminal-cli
+/bin/
 .env

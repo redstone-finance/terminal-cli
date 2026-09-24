@@ -6,21 +6,35 @@ A CLI tool to batch download historical cryptocurrency trade data (Parquet forma
 
 This tool is distributed as a standalone binary. You do not need to install Go or any dependencies.
 
-1. **Locate the `bin` folder** in the project directory.
-2. **Choose the binary** that matches your operating system:  
+1. **Download the binary** for your operating system from the [latest release](https://github.com/redstone-finance/terminal-cli/releases/latest):
 
-   | Operating System | Path | Description |
-   | --- | --- | --- |
-   | **macOS (Apple Silicon)** | `bin/darwin_arm64/terminal-cli` | For Apple Silicon Macs. |
-   | **Linux** | `bin/linux_amd64/terminal-cli` | For standard Linux servers/desktops. |
-   | **Windows** | `bin/windows_amd64/terminal-cli.exe` | For Windows 10/11. |
+   | Operating System | File |
+   | --- | --- |
+   | **macOS (Apple Silicon)** | `terminal-cli-darwin-arm64` |
+   | **macOS (Intel)** | `terminal-cli-darwin-amd64` |
+   | **Linux (x86-64)** | `terminal-cli-linux-amd64` |
+   | **Linux (ARM64)** | `terminal-cli-linux-arm64` |
+   | **Windows (x86-64)** | `terminal-cli-windows-amd64.exe` |
+   | **Windows (ARM64)** | `terminal-cli-windows-arm64.exe` |
 
-3. **Copy the binary** to your working directory (e.g., where you plan to run it).
-4. *(Optional/Linux & Mac)* Ensure the file is executable:
+2. **Rename it** to `terminal-cli` (or `terminal-cli.exe` on Windows) and move it to your working directory.
+3. *(Linux & Mac)* Make it executable:
 
 ```bash
 chmod +x terminal-cli
 
+```
+
+`SHA256SUMS` in the release lists checksums for every binary.
+
+To build all binaries from source into `bin/`, run `make build-all`.
+
+### Publishing a release
+
+Push a `v*` tag; the `Release` workflow builds every platform and attaches the binaries to a GitHub release:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
 ## Configuration
