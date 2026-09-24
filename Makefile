@@ -27,7 +27,7 @@ ASMFLAGS =
 GOFLAGS = -trimpath -buildvcs=false
 OUTDIR  = bin
 
-build: | $(BASE)
+build: | $(BASE) $(OUTDIR)
 	$Q cd $(BASE) && CGO_ENABLED=0 $(GO) build \
 		$(GOFLAGS) \
 		-tags "release,goexperiment.jsonv2" \
@@ -42,6 +42,8 @@ all:  build lint | $(BASE); $(info $(M) built and lint everything!) @
 $(BASE): ; $(info $(M) setting GOPATH…)
 	@mkdir -p $(dir $@)
 	@ln -sf $(CURDIR) $@
+$(OUTDIR):
+	@mkdir -p $@
 
 # External tools 
 $(BIN):
@@ -65,7 +67,7 @@ BUILD_TARGETS = $(addprefix build-,$(PLATFORMS))
 build-all: $(BUILD_TARGETS)
 
 # Outputs bin/terminal-cli-<os>-<arch>[.exe]
-$(BUILD_TARGETS): build-%: | $(BASE)
+$(BUILD_TARGETS): build-%: | $(BASE) $(OUTDIR)
 	$Q cd $(BASE) && \
 	GOOS=$(word 1,$(subst -, ,$*)) GOARCH=$(word 2,$(subst -, ,$*)) CGO_ENABLED=0 $(GO) build \
 		$(GOFLAGS) \
