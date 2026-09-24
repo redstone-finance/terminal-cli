@@ -1,0 +1,32 @@
+{
+  "redstonelive": [
+    "amd_usd",
+    "amzn_usd",
+    "btc_usd",
+    "cept_usd",
+    "dai_usd",
+    "eth_usd",
+    "eur_usd",
+    "fgnx_usd",
+    "fgnxp_usd",
+    "googl_usd",
+    "is_ny_stocks_market_open_usd",
+    "meta_usd",
+    "nvda_usd",
+    "php_usd",
+    "pltr_usd",
+    "spxu_usd",
+    "strc_usd",
+    "try_cex_usd",
+    "try_fx_usd",
+    "try_usd",
+    "tsla_usd",
+    "ura---market_hours_usd",
+    "ura_usd",
+    "usdc_usd",
+    "usdt_usd",
+    "xag_usd",
+    "xau_usd",
+    "xrp_usd"
+  ]
+}

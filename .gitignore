@@ -1,5 +1,35 @@
+# Build
+/bin/
+/dist/
+/vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.*
+
+# Go workspace
+go.work
+go.work.sum
+
+# Local config / data
+.env
+.env.*
+!.env.example
+downloads/
+
+# Tooling
 .codegraph/
 .gopath~/
 .claude/worktrees/
-/bin/
-.env
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
