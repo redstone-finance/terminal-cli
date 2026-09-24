@@ -31,11 +31,13 @@ To build all binaries from source into `bin/`, run `make build-all`.
 
 ### Publishing a release
 
-Push a `v*` tag; the `Release` workflow builds every platform and attaches the binaries to a GitHub release:
+Publish a release; the `Release` workflow then builds every platform and uploads the binaries and `SHA256SUMS` to it (about a minute):
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+gh release create v1.0.0 --generate-notes
 ```
+
+Draft releases don't trigger the workflow until they are published.
 
 ## Configuration
 
