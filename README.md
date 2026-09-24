@@ -87,9 +87,25 @@ The CLI operates in two modes:
 | `--parallel` | `-p` | Number of concurrent downloads | No | `10` |
 | `--api-key` |  | API key (overrides `REDSTONE_TERMINAL_API_KEY`) | No |  |
 | `--yes` | `-y` | Skip confirmation prompts | No | `false` |
+| `--silent` | `-s` | Print nothing and skip prompts (implies `--yes`) | No | `false` |
 | `--help` | `-h` | Show help message | No |  |
 
 > **Note:** The `--tokens` flag requires the full pair name (e.g., `btc_usdt`, `eth_usdc`). Passing just `btc` will not match any files.
+
+### Exit Status
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Every requested file is on disk (downloaded or already present). In `check` mode: data is available. |
+| `1` | A download failed, nothing matched the criteria, or the prompt was declined. |
+| `2` | Invalid flags or arguments, or a missing API key. |
+| `3` | No download failed, but the server does not have some of the requested files yet. |
+
+With `--silent` the exit status is the only signal, for example:
+
+```bash
+terminal-cli -s --type ticker --exchanges redstonelive --tokens btc_usd --start-date 2026-09-01 || echo "exit $?"
+```
 
 ## Features
 

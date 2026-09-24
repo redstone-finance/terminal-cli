@@ -40,8 +40,16 @@ var (
 	startDate   string
 	endDate     string
 	skipConfirm bool
+	silent      bool
 	apiKey      string
 	parallelism int
+)
+
+const (
+	exitFailure = 1
+	exitUsage   = 2
+	// Finished without errors, but the server does not have some files yet.
+	exitMissing = 3
 )
 
 // Set at build time via -ldflags "-X main.version=...".
@@ -78,9 +86,16 @@ func main() {
 	rootCmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompts")
 	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API Key (overrides REDSTONE_TERMINAL_API_KEY env var)")
 	rootCmd.Flags().IntVarP(&parallelism, "parallel", "p", 10, "Number of parallel downloads")
+	rootCmd.Flags().BoolVarP(&silent, "silent", "s", false, "Print nothing and skip prompts (implies --yes); rely on the exit status")
 
+	// Only flags parsed before the bad one are set, so this sees --silent only if it came first.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		c.SilenceErrors, c.SilenceUsage = silent, silent
+		return err
+	})
+	// Run never returns an error, so anything here is a flag or argument error.
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
@@ -91,27 +106,34 @@ type Job struct {
 }
 
 func run(cmd *cobra.Command, args []string) {
+	if silent {
+		pterm.DisableOutput()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		skipConfirm = true
+	}
+
 	if startDate == "" {
 		cmd.Help()
 		pterm.Error.Println("\nMissing required argument: --start-date")
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
 	start, err := time.Parse("2006-01-02", startDate)
 	if err != nil {
 		pterm.Error.Printf("Invalid start date: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 	end := start
 	if endDate != "" {
 		end, err = time.Parse("2006-01-02", endDate)
 		if err != nil {
 			pterm.Error.Printf("Invalid end date: %v\n", err)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if end.Before(start) {
 			pterm.Error.Printf("--end-date (%s) is before --start-date (%s)\n", endDate, startDate)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 	}
 
@@ -121,11 +143,11 @@ func run(cmd *cobra.Command, args []string) {
 	configRules, err := loadConfigRules(dataType)
 	if err != nil {
 		pterm.Error.Printf("Failed to load metadata configurations: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 	if len(configRules) == 0 {
 		pterm.Error.Printf("No configuration files found in metadata/%s folder.\n", dataType)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
 	switch mode {
@@ -134,23 +156,23 @@ func run(cmd *cobra.Command, args []string) {
 	case "day":
 		if len(exchanges) == 0 || len(tokens) == 0 {
 			pterm.Error.Println("\nMode 'day' requires: --exchanges and --tokens")
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if parallelism < 1 {
 			pterm.Error.Printf("--parallel must be at least 1, got %d\n", parallelism)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if apiKey == "" {
 			apiKey = os.Getenv("REDSTONE_TERMINAL_API_KEY")
 		}
 		if apiKey == "" {
 			pterm.Error.Println("\nMissing API key: pass --api-key, or set REDSTONE_TERMINAL_API_KEY in the environment or a .env file")
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		runDayMode(start, end, configRules)
 	default:
 		pterm.Error.Printf("Unknown mode: %s. Supported modes: day, check\n", mode)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
@@ -222,7 +244,7 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(blocks) == 0 {
 		pterm.Warning.Println("No data found for the specified criteria.")
-		return
+		os.Exit(exitFailure)
 	}
 
 	for _, block := range blocks {
@@ -305,7 +327,7 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(jobs) == 0 {
 		pterm.Warning.Println("No matching files found for the given criteria.")
-		return
+		os.Exit(exitFailure)
 	}
 
 	pterm.DefaultSection.Println("Job Summary")
@@ -322,7 +344,7 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 		result, _ := pterm.DefaultInteractiveConfirm.Show("Do you want to continue?")
 		if !result {
 			pterm.Warning.Println("Aborted.")
-			os.Exit(0)
+			os.Exit(exitFailure)
 		}
 	}
 
@@ -340,12 +362,16 @@ const (
 )
 
 func runDownloads(jobs []Job) {
-	bar, _ := pterm.DefaultProgressbar.
-		WithTotal(len(jobs)).
-		WithTitle("Downloading").
-		WithShowElapsedTime(false).
-		WithRemoveWhenDone(true).
-		Start()
+	var bar *pterm.ProgressbarPrinter
+	// Start and Stop write cursor escapes straight to stdout, ignoring DisableOutput.
+	if !silent {
+		bar, _ = pterm.DefaultProgressbar.
+			WithTotal(len(jobs)).
+			WithTitle("Downloading").
+			WithShowElapsedTime(false).
+			WithRemoveWhenDone(true).
+			Start()
+	}
 
 	jobsCh := make(chan Job, len(jobs))
 	var wg sync.WaitGroup
@@ -364,7 +390,9 @@ func runDownloads(jobs []Job) {
 				if line != "" {
 					pterm.Println(line)
 				}
-				bar.Increment()
+				if bar != nil {
+					bar.Increment()
+				}
 				mu.Unlock()
 			}
 		}()
@@ -376,7 +404,9 @@ func runDownloads(jobs []Job) {
 	close(jobsCh)
 
 	wg.Wait()
-	_, _ = bar.Stop()
+	if bar != nil {
+		_, _ = bar.Stop()
+	}
 
 	pterm.Println()
 	row := func(label string, val int, style *pterm.Style) []string {
@@ -391,7 +421,10 @@ func runDownloads(jobs []Job) {
 	}).Render()
 
 	if counts[failed] > 0 {
-		os.Exit(1)
+		os.Exit(exitFailure)
+	}
+	if counts[missing] > 0 {
+		os.Exit(exitMissing)
 	}
 }
 
