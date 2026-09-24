@@ -87,7 +87,7 @@ build-darwin-arm64: | $(BASE)
 
 .PHONY: lint
 lint: $(GOLANGCILINT) | $(BASE) ; $(info $(M) running golangci-lint) @
-	$Q GOEXPERIMENT=jsonv2 $(GOLANGCILINT) run
+	$Q GOEXPERIMENT=jsonv2 $(GOLANGCILINT) run $(LINT_FLAGS)
 
 .PHONY: lint-fix
 lint-fix: $(GOLANGCILINT) | $(BASE) ; $(info $(M) running golangci-lint with auto-fix) @
