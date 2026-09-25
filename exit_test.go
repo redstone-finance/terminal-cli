@@ -24,7 +24,8 @@ func TestSilentExitStatus(t *testing.T) {
 		want int
 	}{
 		{"--silent --mode check --type ticker --start-date 2026-09-01", 0},
-		{"--silent --mode check --type ticker --start-date 2000-01-01", exitFailure},
+		{"--silent --mode check --type ticker --start-date 2000-01-01", exitNoMatch},
+		{"--silent --api-key x --type ticker --exchanges nope --tokens btc_usd --start-date 2026-09-01", exitNoMatch},
 		{"--silent --bogus", exitUsage},
 		{"--silent", exitUsage},
 		{"--silent --start-date 2026-13-01", exitUsage},

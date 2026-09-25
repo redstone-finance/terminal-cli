@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -50,6 +52,11 @@ const (
 	exitUsage   = 2
 	// Finished without errors, but the server does not have some files yet.
 	exitMissing = 3
+	exitNoMatch = 4
+	exitAuth    = 5
+	// Retrying later may succeed.
+	exitNetwork = 6
+	exitDisk    = 7
 )
 
 // Set at build time via -ldflags "-X main.version=...".
@@ -244,7 +251,7 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(blocks) == 0 {
 		pterm.Warning.Println("No data found for the specified criteria.")
-		os.Exit(exitFailure)
+		os.Exit(exitNoMatch)
 	}
 
 	for _, block := range blocks {
@@ -327,7 +334,7 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(jobs) == 0 {
 		pterm.Warning.Println("No matching files found for the given criteria.")
-		os.Exit(exitFailure)
+		os.Exit(exitNoMatch)
 	}
 
 	pterm.DefaultSection.Println("Job Summary")
@@ -354,12 +361,25 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 type outcome int
 
+// Ordered by severity: the worst outcome picks the exit status, so a failure
+// that retrying cannot fix outranks one it can.
 const (
 	saved outcome = iota
 	skipped
 	missing
+	failedNetwork
 	failed
+	failedDisk
+	failedAuth
 )
+
+var exitStatus = [...]int{
+	missing:       exitMissing,
+	failedNetwork: exitNetwork,
+	failed:        exitFailure,
+	failedDisk:    exitDisk,
+	failedAuth:    exitAuth,
+}
 
 func runDownloads(jobs []Job) {
 	var bar *pterm.ProgressbarPrinter
@@ -376,7 +396,8 @@ func runDownloads(jobs []Job) {
 	jobsCh := make(chan Job, len(jobs))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var counts [failed + 1]int
+	var counts [failedAuth + 1]int
+	worst := saved
 
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
@@ -387,6 +408,7 @@ func runDownloads(jobs []Job) {
 				// Serialised: pterm's print-over-active-bar redraw is not goroutine safe.
 				mu.Lock()
 				counts[o]++
+				worst = max(worst, o)
 				if line != "" {
 					pterm.Println(line)
 				}
@@ -417,14 +439,11 @@ func runDownloads(jobs []Job) {
 		row("Saved", counts[saved], pterm.NewStyle(pterm.FgGreen)),
 		row("Skipped", counts[skipped], pterm.NewStyle(pterm.FgYellow)),
 		row("Missing", counts[missing], pterm.NewStyle(pterm.FgYellow)),
-		row("Failed", counts[failed], pterm.NewStyle(pterm.FgRed)),
+		row("Failed", len(jobs)-counts[saved]-counts[skipped]-counts[missing], pterm.NewStyle(pterm.FgRed)),
 	}).Render()
 
-	if counts[failed] > 0 {
-		os.Exit(exitFailure)
-	}
-	if counts[missing] > 0 {
-		os.Exit(exitMissing)
+	if code := exitStatus[worst]; code != 0 {
+		os.Exit(code)
 	}
 }
 
@@ -443,16 +462,35 @@ func processJob(job Job) (outcome, string) {
 	if errors.Is(err, errNotFound) {
 		return missing, pterm.Warning.Sprintf("%s  %v", label, err)
 	}
-	if err != nil {
-		return failed, pterm.Error.Sprintf("%s  %v", label, err)
+	if err == nil {
+		err = downloadStream(dlURL, fullPath)
 	}
-
-	if err := downloadStream(dlURL, fullPath); err != nil {
-		return failed, pterm.Error.Sprintf("%s  %v", label, err)
+	if err != nil {
+		return classify(err), pterm.Error.Sprintf("%s  %v", label, err)
 	}
 	return saved, pterm.Success.Sprintf("%s  %s  %s", label,
 		pterm.Gray(fmt.Sprintf("%.2f MB", float64(size)/1024/1024)),
 		pterm.Gray(time.Since(started).Round(100*time.Millisecond)))
+}
+
+func classify(err error) outcome {
+	switch {
+	case errors.Is(err, errAuth):
+		return failedAuth
+	case errors.Is(err, errUnavailable), errors.Is(err, io.ErrUnexpectedEOF):
+		return failedNetwork
+	}
+	// io.Copy's write errors are *fs.PathError; its read errors are net.Error or io.ErrUnexpectedEOF.
+	if _, ok := errors.AsType[*fs.PathError](err); ok {
+		return failedDisk
+	}
+	if _, ok := errors.AsType[*os.LinkError](err); ok {
+		return failedDisk
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return failedNetwork
+	}
+	return failed
 }
 
 func loadConfigRules(dType string) ([]ConfigRule, error) {
@@ -564,13 +602,16 @@ type APIResponse struct {
 }
 
 var (
-	errNotFound = errors.New("not found on server")
-	errAPI      = errors.New("api error")
+	errNotFound    = errors.New("not found on server")
+	errAPI         = errors.New("api error")
+	errAuth        = errors.New("api key rejected")
+	errUnavailable = errors.New("server unavailable")
 )
 
+var apiURL = "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
+
 func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
-	baseURL := "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
-	req, err := http.NewRequest("GET", baseURL, nil)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", 0, err
 	}
@@ -608,7 +649,14 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 			}
 			return "", 0, fmt.Errorf("%w: %s", errNotFound, msg)
 		}
-		return "", 0, fmt.Errorf("%w: %s", errAPI, msg)
+		kind := errAPI
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+			kind = errAuth
+		case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
+			kind = errUnavailable
+		}
+		return "", 0, fmt.Errorf("%w: %s", kind, msg)
 	}
 
 	var successResp APIResponse
@@ -632,6 +680,9 @@ func downloadStream(url, fullPath string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("%w: status %d", errUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
