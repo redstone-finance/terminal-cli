@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -40,9 +42,25 @@ var (
 	startDate   string
 	endDate     string
 	skipConfirm bool
+	silent      bool
 	apiKey      string
 	parallelism int
 )
+
+const (
+	exitFailure = 1
+	exitUsage   = 2
+	// Finished without errors, but the server does not have some files yet.
+	exitMissing = 3
+	exitNoMatch = 4
+	exitAuth    = 5
+	// Retrying later may succeed.
+	exitNetwork = 6
+	exitDisk    = 7
+)
+
+// Set at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	_ = godotenv.Load()
@@ -62,7 +80,8 @@ func main() {
 
   # See what is available before downloading
   terminal-cli --mode check --type ticker --start-date 2026-09-01`,
-		Run: run,
+		Run:     run,
+		Version: version,
 	}
 
 	rootCmd.Flags().StringVar(&mode, "mode", "day", "Data mode: day, check")
@@ -74,9 +93,16 @@ func main() {
 	rootCmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompts")
 	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API Key (overrides REDSTONE_TERMINAL_API_KEY env var)")
 	rootCmd.Flags().IntVarP(&parallelism, "parallel", "p", 10, "Number of parallel downloads")
+	rootCmd.Flags().BoolVarP(&silent, "silent", "s", false, "Print nothing and skip prompts (implies --yes); rely on the exit status")
 
+	// Only flags parsed before the bad one are set, so this sees --silent only if it came first.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		c.SilenceErrors, c.SilenceUsage = silent, silent
+		return err
+	})
+	// Run never returns an error, so anything here is a flag or argument error.
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
@@ -87,27 +113,34 @@ type Job struct {
 }
 
 func run(cmd *cobra.Command, args []string) {
+	if silent {
+		pterm.DisableOutput()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		skipConfirm = true
+	}
+
 	if startDate == "" {
 		cmd.Help()
 		pterm.Error.Println("\nMissing required argument: --start-date")
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
 	start, err := time.Parse("2006-01-02", startDate)
 	if err != nil {
 		pterm.Error.Printf("Invalid start date: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 	end := start
 	if endDate != "" {
 		end, err = time.Parse("2006-01-02", endDate)
 		if err != nil {
 			pterm.Error.Printf("Invalid end date: %v\n", err)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if end.Before(start) {
 			pterm.Error.Printf("--end-date (%s) is before --start-date (%s)\n", endDate, startDate)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 	}
 
@@ -117,11 +150,11 @@ func run(cmd *cobra.Command, args []string) {
 	configRules, err := loadConfigRules(dataType)
 	if err != nil {
 		pterm.Error.Printf("Failed to load metadata configurations: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 	if len(configRules) == 0 {
 		pterm.Error.Printf("No configuration files found in metadata/%s folder.\n", dataType)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
 	switch mode {
@@ -130,23 +163,23 @@ func run(cmd *cobra.Command, args []string) {
 	case "day":
 		if len(exchanges) == 0 || len(tokens) == 0 {
 			pterm.Error.Println("\nMode 'day' requires: --exchanges and --tokens")
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if parallelism < 1 {
 			pterm.Error.Printf("--parallel must be at least 1, got %d\n", parallelism)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if apiKey == "" {
 			apiKey = os.Getenv("REDSTONE_TERMINAL_API_KEY")
 		}
 		if apiKey == "" {
 			pterm.Error.Println("\nMissing API key: pass --api-key, or set REDSTONE_TERMINAL_API_KEY in the environment or a .env file")
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		runDayMode(start, end, configRules)
 	default:
 		pterm.Error.Printf("Unknown mode: %s. Supported modes: day, check\n", mode)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
@@ -218,7 +251,7 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(blocks) == 0 {
 		pterm.Warning.Println("No data found for the specified criteria.")
-		return
+		os.Exit(exitNoMatch)
 	}
 
 	for _, block := range blocks {
@@ -301,7 +334,7 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(jobs) == 0 {
 		pterm.Warning.Println("No matching files found for the given criteria.")
-		return
+		os.Exit(exitNoMatch)
 	}
 
 	pterm.DefaultSection.Println("Job Summary")
@@ -318,7 +351,7 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 		result, _ := pterm.DefaultInteractiveConfirm.Show("Do you want to continue?")
 		if !result {
 			pterm.Warning.Println("Aborted.")
-			os.Exit(0)
+			os.Exit(exitFailure)
 		}
 	}
 
@@ -328,25 +361,43 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 type outcome int
 
+// Ordered by severity: the worst outcome picks the exit status, so a failure
+// that retrying cannot fix outranks one it can.
 const (
 	saved outcome = iota
 	skipped
 	missing
+	failedNetwork
 	failed
+	failedDisk
+	failedAuth
 )
 
+var exitStatus = [...]int{
+	missing:       exitMissing,
+	failedNetwork: exitNetwork,
+	failed:        exitFailure,
+	failedDisk:    exitDisk,
+	failedAuth:    exitAuth,
+}
+
 func runDownloads(jobs []Job) {
-	bar, _ := pterm.DefaultProgressbar.
-		WithTotal(len(jobs)).
-		WithTitle("Downloading").
-		WithShowElapsedTime(false).
-		WithRemoveWhenDone(true).
-		Start()
+	var bar *pterm.ProgressbarPrinter
+	// Start and Stop write cursor escapes straight to stdout, ignoring DisableOutput.
+	if !silent {
+		bar, _ = pterm.DefaultProgressbar.
+			WithTotal(len(jobs)).
+			WithTitle("Downloading").
+			WithShowElapsedTime(false).
+			WithRemoveWhenDone(true).
+			Start()
+	}
 
 	jobsCh := make(chan Job, len(jobs))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var counts [failed + 1]int
+	var counts [failedAuth + 1]int
+	worst := saved
 
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
@@ -357,10 +408,13 @@ func runDownloads(jobs []Job) {
 				// Serialised: pterm's print-over-active-bar redraw is not goroutine safe.
 				mu.Lock()
 				counts[o]++
+				worst = max(worst, o)
 				if line != "" {
 					pterm.Println(line)
 				}
-				bar.Increment()
+				if bar != nil {
+					bar.Increment()
+				}
 				mu.Unlock()
 			}
 		}()
@@ -372,7 +426,9 @@ func runDownloads(jobs []Job) {
 	close(jobsCh)
 
 	wg.Wait()
-	_, _ = bar.Stop()
+	if bar != nil {
+		_, _ = bar.Stop()
+	}
 
 	pterm.Println()
 	row := func(label string, val int, style *pterm.Style) []string {
@@ -383,11 +439,11 @@ func runDownloads(jobs []Job) {
 		row("Saved", counts[saved], pterm.NewStyle(pterm.FgGreen)),
 		row("Skipped", counts[skipped], pterm.NewStyle(pterm.FgYellow)),
 		row("Missing", counts[missing], pterm.NewStyle(pterm.FgYellow)),
-		row("Failed", counts[failed], pterm.NewStyle(pterm.FgRed)),
+		row("Failed", len(jobs)-counts[saved]-counts[skipped]-counts[missing], pterm.NewStyle(pterm.FgRed)),
 	}).Render()
 
-	if counts[failed] > 0 {
-		os.Exit(1)
+	if code := exitStatus[worst]; code != 0 {
+		os.Exit(code)
 	}
 }
 
@@ -406,16 +462,34 @@ func processJob(job Job) (outcome, string) {
 	if errors.Is(err, errNotFound) {
 		return missing, pterm.Warning.Sprintf("%s  %v", label, err)
 	}
-	if err != nil {
-		return failed, pterm.Error.Sprintf("%s  %v", label, err)
+	if err == nil {
+		err = downloadStream(dlURL, fullPath)
 	}
-
-	if err := downloadStream(dlURL, fullPath); err != nil {
-		return failed, pterm.Error.Sprintf("%s  %v", label, err)
+	if err != nil {
+		return classify(err), pterm.Error.Sprintf("%s  %v", label, err)
 	}
 	return saved, pterm.Success.Sprintf("%s  %s  %s", label,
 		pterm.Gray(fmt.Sprintf("%.2f MB", float64(size)/1024/1024)),
 		pterm.Gray(time.Since(started).Round(100*time.Millisecond)))
+}
+
+func classify(err error) outcome {
+	switch {
+	case errors.Is(err, errAuth):
+		return failedAuth
+	case errors.Is(err, errDisk):
+		return failedDisk
+	case errors.Is(err, errUnavailable), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return failedNetwork
+	}
+	// Refused or dropped connections and DNS failures; TLS, URL and redirect errors are not *net.OpError.
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return failedNetwork
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		return failedNetwork
+	}
+	return failed
 }
 
 func loadConfigRules(dType string) ([]ConfigRule, error) {
@@ -527,13 +601,21 @@ type APIResponse struct {
 }
 
 var (
-	errNotFound = errors.New("not found on server")
-	errAPI      = errors.New("api error")
+	errNotFound    = errors.New("not found on server")
+	errAPI         = errors.New("api error")
+	errAuth        = errors.New("api key rejected")
+	errUnavailable = errors.New("server unavailable")
+	errDisk        = errors.New("cannot write file")
 )
 
+func retryableStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+}
+
+var apiURL = "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
+
 func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
-	baseURL := "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
-	req, err := http.NewRequest("GET", baseURL, nil)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", 0, err
 	}
@@ -571,12 +653,22 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 			}
 			return "", 0, fmt.Errorf("%w: %s", errNotFound, msg)
 		}
-		return "", 0, fmt.Errorf("%w: %s", errAPI, msg)
+		kind := errAPI
+		// Not 403: API Gateway also sends it for unknown routes and WAF blocks.
+		if resp.StatusCode == http.StatusUnauthorized {
+			kind = errAuth
+		} else if retryableStatus(resp.StatusCode) {
+			kind = errUnavailable
+		}
+		return "", 0, fmt.Errorf("%w: %s", kind, msg)
 	}
 
 	var successResp APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&successResp); err != nil {
-		return "", 0, fmt.Errorf("invalid json: %v", err)
+		return "", 0, fmt.Errorf("invalid json: %w", err)
+	}
+	if successResp.DownloadURL == "" {
+		return "", 0, fmt.Errorf("%w: no download_url in response", errAPI)
 	}
 
 	return successResp.DownloadURL, successResp.FileSize, nil
@@ -595,30 +687,40 @@ func downloadStream(url, fullPath string) error {
 	}
 	defer resp.Body.Close()
 
+	if retryableStatus(resp.StatusCode) {
+		return fmt.Errorf("%w: status %d", errUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 	// Download to a temporary file so an interrupted transfer never leaves a
 	// truncated .parquet that the "already exists" check would skip forever.
 	tmpPath := fullPath + ".part"
 	file, err := os.Create(tmpPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 
 	if _, err := io.Copy(file, resp.Body); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmpPath)
+		// Only the write side returns *fs.PathError; read errors come from the network.
+		if _, ok := errors.AsType[*fs.PathError](err); ok {
+			return fmt.Errorf("%w: %w", errDisk, err)
+		}
 		return err
 	}
 	if err := file.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 
-	return os.Rename(tmpPath, fullPath)
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		return fmt.Errorf("%w: %w", errDisk, err)
+	}
+	return nil
 }
