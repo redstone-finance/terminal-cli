@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -40,9 +42,25 @@ var (
 	startDate   string
 	endDate     string
 	skipConfirm bool
+	silent      bool
 	apiKey      string
 	parallelism int
 )
+
+const (
+	exitFailure = 1
+	exitUsage   = 2
+	// Finished without errors, but the server does not have some files yet.
+	exitMissing = 3
+	exitNoMatch = 4
+	exitAuth    = 5
+	// Retrying later may succeed.
+	exitNetwork = 6
+	exitDisk    = 7
+)
+
+// Set at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	_ = godotenv.Load()
@@ -62,7 +80,8 @@ func main() {
 
   # See what is available before downloading
   terminal-cli --mode check --type ticker --start-date 2026-09-01`,
-		Run: run,
+		Run:     run,
+		Version: version,
 	}
 
 	rootCmd.Flags().StringVar(&mode, "mode", "day", "Data mode: day, check")
@@ -74,43 +93,54 @@ func main() {
 	rootCmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompts")
 	rootCmd.Flags().StringVar(&apiKey, "api-key", "", "API Key (overrides REDSTONE_TERMINAL_API_KEY env var)")
 	rootCmd.Flags().IntVarP(&parallelism, "parallel", "p", 10, "Number of parallel downloads")
+	rootCmd.Flags().BoolVarP(&silent, "silent", "s", false, "Print nothing and skip prompts (implies --yes); rely on the exit status")
 
+	// Only flags parsed before the bad one are set, so this sees --silent only if it came first.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		c.SilenceErrors, c.SilenceUsage = silent, silent
+		return err
+	})
+	// Run never returns an error, so anything here is a flag or argument error.
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
 type Job struct {
-	Index    int
-	Total    int
 	Exchange string
 	Pair     string
 	Date     time.Time
-	Bar      *pterm.ProgressbarPrinter
 }
 
 func run(cmd *cobra.Command, args []string) {
+	if silent {
+		pterm.DisableOutput()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		skipConfirm = true
+	}
+
 	if startDate == "" {
 		cmd.Help()
 		pterm.Error.Println("\nMissing required argument: --start-date")
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
 	start, err := time.Parse("2006-01-02", startDate)
 	if err != nil {
 		pterm.Error.Printf("Invalid start date: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 	end := start
 	if endDate != "" {
 		end, err = time.Parse("2006-01-02", endDate)
 		if err != nil {
 			pterm.Error.Printf("Invalid end date: %v\n", err)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if end.Before(start) {
 			pterm.Error.Printf("--end-date (%s) is before --start-date (%s)\n", endDate, startDate)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 	}
 
@@ -120,11 +150,11 @@ func run(cmd *cobra.Command, args []string) {
 	configRules, err := loadConfigRules(dataType)
 	if err != nil {
 		pterm.Error.Printf("Failed to load metadata configurations: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 	if len(configRules) == 0 {
 		pterm.Error.Printf("No configuration files found in metadata/%s folder.\n", dataType)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 
 	switch mode {
@@ -133,23 +163,23 @@ func run(cmd *cobra.Command, args []string) {
 	case "day":
 		if len(exchanges) == 0 || len(tokens) == 0 {
 			pterm.Error.Println("\nMode 'day' requires: --exchanges and --tokens")
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if parallelism < 1 {
 			pterm.Error.Printf("--parallel must be at least 1, got %d\n", parallelism)
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		if apiKey == "" {
 			apiKey = os.Getenv("REDSTONE_TERMINAL_API_KEY")
 		}
 		if apiKey == "" {
 			pterm.Error.Println("\nMissing API key: pass --api-key, or set REDSTONE_TERMINAL_API_KEY in the environment or a .env file")
-			os.Exit(1)
+			os.Exit(exitUsage)
 		}
 		runDayMode(start, end, configRules)
 	default:
 		pterm.Error.Printf("Unknown mode: %s. Supported modes: day, check\n", mode)
-		os.Exit(1)
+		os.Exit(exitUsage)
 	}
 }
 
@@ -221,7 +251,7 @@ func runCheckMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(blocks) == 0 {
 		pterm.Warning.Println("No data found for the specified criteria.")
-		return
+		os.Exit(exitNoMatch)
 	}
 
 	for _, block := range blocks {
@@ -304,12 +334,7 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 
 	if len(jobs) == 0 {
 		pterm.Warning.Println("No matching files found for the given criteria.")
-		return
-	}
-
-	for i := range jobs {
-		jobs[i].Index = i + 1
-		jobs[i].Total = len(jobs)
+		os.Exit(exitNoMatch)
 	}
 
 	pterm.DefaultSection.Println("Job Summary")
@@ -318,11 +343,15 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 	pterm.Info.Printf("Concurrency: %d\n", parallelism)
 	pterm.Info.Printf("Range: %s to %s\n", jobs[0].Date.Format("2006-01-02"), jobs[len(jobs)-1].Date.Format("2006-01-02"))
 
+	if today := time.Now().UTC().Truncate(24 * time.Hour); !jobs[len(jobs)-1].Date.Before(today) {
+		pterm.Warning.Println("Range reaches today: today's files are usually not published yet")
+	}
+
 	if !skipConfirm {
 		result, _ := pterm.DefaultInteractiveConfirm.Show("Do you want to continue?")
 		if !result {
 			pterm.Warning.Println("Aborted.")
-			os.Exit(0)
+			os.Exit(exitFailure)
 		}
 	}
 
@@ -330,39 +359,63 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 	runDownloads(jobs)
 }
 
+type outcome int
+
+// Ordered by severity: the worst outcome picks the exit status, so a failure
+// that retrying cannot fix outranks one it can.
+const (
+	saved outcome = iota
+	skipped
+	missing
+	failedNetwork
+	failed
+	failedDisk
+	failedAuth
+)
+
+var exitStatus = [...]int{
+	missing:       exitMissing,
+	failedNetwork: exitNetwork,
+	failed:        exitFailure,
+	failedDisk:    exitDisk,
+	failedAuth:    exitAuth,
+}
+
 func runDownloads(jobs []Job) {
-	multi := pterm.DefaultMultiPrinter
-
-	// Every writer must exist before Start: NewWriter appends to
-	// multi.buffers, which Start's 200ms render ticker then reads.
-	for i := range jobs {
-		relPath := getRelativePath(jobs[i].Exchange, jobs[i].Pair, dataType, jobs[i].Date)
-		fullPath := localPath(relPath)
-		jobLabel := fmt.Sprintf("[%d/%d] %s", jobs[i].Index, jobs[i].Total, fullPath)
-
-		bar, _ := pterm.DefaultProgressbar.
-			WithWriter(multi.NewWriter()).
-			WithTotal(100).
-			WithTitle(fmt.Sprintf("%s ... Pending", jobLabel)).
+	var bar *pterm.ProgressbarPrinter
+	// Start and Stop write cursor escapes straight to stdout, ignoring DisableOutput.
+	if !silent {
+		bar, _ = pterm.DefaultProgressbar.
+			WithTotal(len(jobs)).
+			WithTitle("Downloading").
+			WithShowElapsedTime(false).
+			WithRemoveWhenDone(true).
 			Start()
-
-		jobs[i].Bar = bar
 	}
-
-	multi.Start()
 
 	jobsCh := make(chan Job, len(jobs))
 	var wg sync.WaitGroup
-
-	var successCount, failCount, skipCount int64
 	var mu sync.Mutex
+	var counts [failedAuth + 1]int
+	worst := saved
 
 	for i := 0; i < parallelism; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range jobsCh {
-				processJob(job, &successCount, &failCount, &skipCount, &mu)
+				o, line := processJob(job)
+				// Serialised: pterm's print-over-active-bar redraw is not goroutine safe.
+				mu.Lock()
+				counts[o]++
+				worst = max(worst, o)
+				if line != "" {
+					pterm.Println(line)
+				}
+				if bar != nil {
+					bar.Increment()
+				}
+				mu.Unlock()
 			}
 		}()
 	}
@@ -373,85 +426,70 @@ func runDownloads(jobs []Job) {
 	close(jobsCh)
 
 	wg.Wait()
-	multi.Stop()
+	if bar != nil {
+		_, _ = bar.Stop()
+	}
 
 	pterm.Println()
-	pterm.DefaultHeader.
-		WithBackgroundStyle(pterm.NewStyle(pterm.BgGreen)).
-		WithTextStyle(pterm.NewStyle(pterm.FgBlack)).
-		Println("Finished")
-
-	row := func(label string, val int64, style *pterm.Style) []string {
-		return []string{style.Sprint(label), style.Sprint(fmt.Sprintf("%d", val))}
+	row := func(label string, val int, style *pterm.Style) []string {
+		return []string{style.Sprint(label), style.Sprint(val)}
 	}
+	_ = pterm.DefaultTable.WithData(pterm.TableData{
+		row("Total", len(jobs), pterm.NewStyle(pterm.FgLightBlue)),
+		row("Saved", counts[saved], pterm.NewStyle(pterm.FgGreen)),
+		row("Skipped", counts[skipped], pterm.NewStyle(pterm.FgYellow)),
+		row("Missing", counts[missing], pterm.NewStyle(pterm.FgYellow)),
+		row("Failed", len(jobs)-counts[saved]-counts[skipped]-counts[missing], pterm.NewStyle(pterm.FgRed)),
+	}).Render()
 
-	summaryTable := pterm.TableData{
-		row("Total", int64(len(jobs)), pterm.NewStyle(pterm.FgLightBlue)),
-		row("Success", successCount, pterm.NewStyle(pterm.FgGreen)),
-		row("Skipped", skipCount, pterm.NewStyle(pterm.FgYellow)),
-		row("Failed", failCount, pterm.NewStyle(pterm.FgRed)),
+	if code := exitStatus[worst]; code != 0 {
+		os.Exit(code)
 	}
-	pterm.DefaultTable.WithData(summaryTable).Render()
 }
 
-func processJob(job Job, success, fail, skip *int64, mu *sync.Mutex) {
+// An empty line means nothing to log (skipped).
+func processJob(job Job) (outcome, string) {
 	relPath := getRelativePath(job.Exchange, job.Pair, dataType, job.Date)
 	fullPath := localPath(relPath)
-	jobLabel := fmt.Sprintf("[%d/%d] %s", job.Index, job.Total, fullPath)
-
-	errPrefix := pterm.Error.Prefix.Style.Sprint(pterm.Error.Prefix.Text)
-	okPrefix := pterm.Success.Prefix.Style.Sprint(pterm.Success.Prefix.Text)
-	skipPrefix := pterm.Warning.Prefix.Style.Sprint(pterm.Warning.Prefix.Text)
-
-	bar := job.Bar
+	label := fmt.Sprintf("%s %s %s", job.Date.Format("2006-01-02"), job.Exchange, job.Pair)
 
 	if _, err := os.Stat(fullPath); err == nil {
-		bar.UpdateTitle(fmt.Sprintf("%s %s - Skipped (Exists)", skipPrefix, jobLabel))
-		bar.Total = 1
-		bar.Increment()
-		_, _ = bar.Stop()
-
-		mu.Lock()
-		*skip++
-		mu.Unlock()
-		return
+		return skipped, ""
 	}
 
-	bar.UpdateTitle(fmt.Sprintf("%s %s ... Fetching", pterm.LightBlue("LOADING"), jobLabel))
+	started := time.Now()
 	dlURL, size, err := fetchDownloadLink(apiKey, relPath)
-	if err != nil {
-		bar.UpdateTitle(fmt.Sprintf("%s %s - Error: %v", errPrefix, jobLabel, err))
-		_, _ = bar.Stop()
-		mu.Lock()
-		*fail++
-		mu.Unlock()
-		return
+	if errors.Is(err, errNotFound) {
+		return missing, pterm.Warning.Sprintf("%s  %v", label, err)
 	}
-
-	bar.UpdateTitle(fmt.Sprintf("%s %s", pterm.LightBlue("LOADING"), jobLabel))
-	// +1 keeps the bar out of pterm's two dead states: Total==0 renders an
-	// empty string (the job's row vanishes), and Current==Total auto-stops the
-	// bar, after which UpdateTitle also renders an empty string and the final
-	// "Saved" line is never shown.
-	bar.Total = int(size) + 1
-
-	err = downloadStream(dlURL, fullPath, bar)
-
-	if err != nil {
-		bar.UpdateTitle(fmt.Sprintf("%s %s - Failed: %v", errPrefix, jobLabel, err))
-		_, _ = bar.Stop()
-		mu.Lock()
-		*fail++
-		mu.Unlock()
-	} else {
-		sizeStr := pterm.Gray(fmt.Sprintf("(%.2f MB)", float64(size)/1024/1024))
-		successMsg := fmt.Sprintf("%s %s - Saved %s", okPrefix, jobLabel, sizeStr)
-		bar.UpdateTitle(successMsg)
-		_, _ = bar.Stop()
-		mu.Lock()
-		*success++
-		mu.Unlock()
+	if err == nil {
+		err = downloadStream(dlURL, fullPath)
 	}
+	if err != nil {
+		return classify(err), pterm.Error.Sprintf("%s  %v", label, err)
+	}
+	return saved, pterm.Success.Sprintf("%s  %s  %s", label,
+		pterm.Gray(fmt.Sprintf("%.2f MB", float64(size)/1024/1024)),
+		pterm.Gray(time.Since(started).Round(100*time.Millisecond)))
+}
+
+func classify(err error) outcome {
+	switch {
+	case errors.Is(err, errAuth):
+		return failedAuth
+	case errors.Is(err, errDisk):
+		return failedDisk
+	case errors.Is(err, errUnavailable), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return failedNetwork
+	}
+	// Refused or dropped connections and DNS failures; TLS, URL and redirect errors are not *net.OpError.
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return failedNetwork
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		return failedNetwork
+	}
+	return failed
 }
 
 func loadConfigRules(dType string) ([]ConfigRule, error) {
@@ -562,9 +600,22 @@ type APIResponse struct {
 	Message     string `json:"message"`
 }
 
+var (
+	errNotFound    = errors.New("not found on server")
+	errAPI         = errors.New("api error")
+	errAuth        = errors.New("api key rejected")
+	errUnavailable = errors.New("server unavailable")
+	errDisk        = errors.New("cannot write file")
+)
+
+func retryableStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+}
+
+var apiURL = "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
+
 func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
-	baseURL := "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
-	req, err := http.NewRequest("GET", baseURL, nil)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", 0, err
 	}
@@ -584,24 +635,40 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		var apiErr APIResponse
 		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
 		// The gateway uses "message" for some failures and "error" for others.
-		for _, msg := range []string{apiErr.Message, apiErr.Error} {
-			if msg != "" {
-				return "", 0, errors.New(msg)
+		msg := fmt.Sprintf("status %d", resp.StatusCode)
+		for _, m := range []string{apiErr.Message, apiErr.Error} {
+			if m != "" {
+				msg = m
+				break
 			}
 		}
-		if resp.StatusCode == 404 {
-			return "", 0, errors.New("file not found on server")
+		if resp.StatusCode == http.StatusNotFound {
+			// The gateway's usual message just echoes the path we asked for.
+			if msg == "File not found: "+relPath {
+				return "", 0, errNotFound
+			}
+			return "", 0, fmt.Errorf("%w: %s", errNotFound, msg)
 		}
-		return "", 0, fmt.Errorf("api status %d", resp.StatusCode)
+		kind := errAPI
+		// Not 403: API Gateway also sends it for unknown routes and WAF blocks.
+		if resp.StatusCode == http.StatusUnauthorized {
+			kind = errAuth
+		} else if retryableStatus(resp.StatusCode) {
+			kind = errUnavailable
+		}
+		return "", 0, fmt.Errorf("%w: %s", kind, msg)
 	}
 
 	var successResp APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&successResp); err != nil {
-		return "", 0, fmt.Errorf("invalid json: %v", err)
+		return "", 0, fmt.Errorf("invalid json: %w", err)
+	}
+	if successResp.DownloadURL == "" {
+		return "", 0, fmt.Errorf("%w: no download_url in response", errAPI)
 	}
 
 	return successResp.DownloadURL, successResp.FileSize, nil
@@ -613,64 +680,47 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 // files ever outgrow it.
 var downloadClient = &http.Client{Timeout: 30 * time.Minute}
 
-func downloadStream(url, fullPath string, bar *pterm.ProgressbarPrinter) error {
+func downloadStream(url, fullPath string) error {
 	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
+	if retryableStatus(resp.StatusCode) {
+		return fmt.Errorf("%w: status %d", errUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 	// Download to a temporary file so an interrupted transfer never leaves a
 	// truncated .parquet that the "already exists" check would skip forever.
 	tmpPath := fullPath + ".part"
 	file, err := os.Create(tmpPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 
-	proxyReader := &ProgressReader{Reader: resp.Body, Bar: bar}
-	if _, err := io.Copy(file, proxyReader); err != nil {
+	if _, err := io.Copy(file, resp.Body); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmpPath)
+		// Only the write side returns *fs.PathError; read errors come from the network.
+		if _, ok := errors.AsType[*fs.PathError](err); ok {
+			return fmt.Errorf("%w: %w", errDisk, err)
+		}
 		return err
 	}
 	if err := file.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 
-	return os.Rename(tmpPath, fullPath)
-}
-
-// Every Bar.Add re-renders the bar into its multi-printer buffer, which is
-// never truncated: at one render per 32KB read a 1GB file left ~10MB of ANSI
-// behind, and the multi-printer re-scans every buffer 5 times a second.
-const progressUpdateInterval = 100 * time.Millisecond
-
-type ProgressReader struct {
-	Reader io.Reader
-	Bar    *pterm.ProgressbarPrinter
-
-	pending    int
-	lastUpdate time.Time
-}
-
-func (pr *ProgressReader) Read(p []byte) (int, error) {
-	n, err := pr.Reader.Read(p)
-	pr.pending += n
-
-	if pr.Bar != nil && pr.pending > 0 && (err != nil || time.Since(pr.lastUpdate) >= progressUpdateInterval) {
-		pr.Bar.Add(pr.pending)
-		pr.pending = 0
-		pr.lastUpdate = time.Now()
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
-
-	return n, err
+	return nil
 }
