@@ -48,26 +48,34 @@ func TestDownloadStreamWritesFileOnSuccess(t *testing.T) {
 
 func TestClassify(t *testing.T) {
 	defer func(u string) { apiURL = u }(apiURL)
-	serve := func(code int) string {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(code)
-			_, _ = w.Write([]byte(`{"message":"x"}`))
-		}))
+	server := func(h http.HandlerFunc) string {
+		srv := httptest.NewServer(h)
 		t.Cleanup(srv.Close)
 		return srv.URL
 	}
-	fetch := func(code int) error {
-		apiURL = serve(code)
+	serve := func(code int, body string) string {
+		return server(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(body))
+		})
+	}
+	fetch := func(url string) error {
+		apiURL = url
 		_, _, err := fetchDownloadLink("key", "f")
 		return err
 	}
-	aborted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	status := func(code int) error { return fetch(serve(code, `{"message":"x"}`)) }
+	aborted := server(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1024")
-		_, _ = w.Write([]byte("partial"))
+		_, _ = w.Write([]byte(`{"download_url":`))
 		w.(http.Flusher).Flush()
 		panic(http.ErrAbortHandler)
-	}))
-	defer aborted.Close()
+	})
+	loop := server(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
+	untrusted := httptest.NewTLSServer(http.NotFoundHandler())
+	defer untrusted.Close()
 	closed := httptest.NewServer(nil)
 	closed.Close()
 
@@ -78,22 +86,32 @@ func TestClassify(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "dir.parquet", "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ok := serve(http.StatusOK)
+	ok := serve(http.StatusOK, "")
+	download := func(url string) error {
+		return downloadStream(url, filepath.Join(t.TempDir(), "x.parquet"))
+	}
 
 	for _, tc := range []struct {
 		name string
 		err  error
 		want outcome
 	}{
-		{"api 401", fetch(http.StatusUnauthorized), failedAuth},
-		{"api 403", fetch(http.StatusForbidden), failedAuth},
-		{"api 429", fetch(http.StatusTooManyRequests), failedNetwork},
-		{"api 502", fetch(http.StatusBadGateway), failedNetwork},
-		{"api 400", fetch(http.StatusBadRequest), failed},
-		{"download 503", downloadStream(serve(http.StatusServiceUnavailable), filepath.Join(dir, "a")), failedNetwork},
-		{"download 403", downloadStream(serve(http.StatusForbidden), filepath.Join(dir, "b")), failed},
-		{"connection refused", downloadStream(closed.URL, filepath.Join(dir, "c")), failedNetwork},
-		{"aborted transfer", downloadStream(aborted.URL, filepath.Join(dir, "d")), failedNetwork},
+		{"api 401", status(http.StatusUnauthorized), failedAuth},
+		{"api 403", status(http.StatusForbidden), failed},
+		{"api 429", status(http.StatusTooManyRequests), failedNetwork},
+		{"api 502", status(http.StatusBadGateway), failedNetwork},
+		{"api 400", status(http.StatusBadRequest), failed},
+		{"api no download_url", fetch(serve(http.StatusOK, `{}`)), failed},
+		{"api cut-off json", fetch(aborted), failedNetwork},
+		{"download 503", download(serve(http.StatusServiceUnavailable, "")), failedNetwork},
+		{"download 429", download(serve(http.StatusTooManyRequests, "")), failedNetwork},
+		{"download 408", download(serve(http.StatusRequestTimeout, "")), failedNetwork},
+		{"download 403", download(serve(http.StatusForbidden, "")), failed},
+		{"connection refused", download(closed.URL), failedNetwork},
+		{"aborted transfer", download(aborted), failedNetwork},
+		{"untrusted certificate", download(untrusted.URL), failed},
+		{"redirect loop", download(loop), failed},
+		{"empty url", download(""), failed},
 		{"mkdir", downloadStream(ok, filepath.Join(dir, "file", "x.parquet")), failedDisk},
 		{"rename", downloadStream(ok, filepath.Join(dir, "dir.parquet")), failedDisk},
 	} {

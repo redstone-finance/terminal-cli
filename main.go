@@ -477,17 +477,16 @@ func classify(err error) outcome {
 	switch {
 	case errors.Is(err, errAuth):
 		return failedAuth
-	case errors.Is(err, errUnavailable), errors.Is(err, io.ErrUnexpectedEOF):
+	case errors.Is(err, errDisk):
+		return failedDisk
+	case errors.Is(err, errUnavailable), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return failedNetwork
 	}
-	// io.Copy's write errors are *fs.PathError; its read errors are net.Error or io.ErrUnexpectedEOF.
-	if _, ok := errors.AsType[*fs.PathError](err); ok {
-		return failedDisk
+	// Refused or dropped connections and DNS failures; TLS, URL and redirect errors are not *net.OpError.
+	if _, ok := errors.AsType[*net.OpError](err); ok {
+		return failedNetwork
 	}
-	if _, ok := errors.AsType[*os.LinkError](err); ok {
-		return failedDisk
-	}
-	if _, ok := errors.AsType[net.Error](err); ok {
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		return failedNetwork
 	}
 	return failed
@@ -606,7 +605,12 @@ var (
 	errAPI         = errors.New("api error")
 	errAuth        = errors.New("api key rejected")
 	errUnavailable = errors.New("server unavailable")
+	errDisk        = errors.New("cannot write file")
 )
+
+func retryableStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
+}
 
 var apiURL = "https://7879w58k4l.execute-api.eu-west-1.amazonaws.com/dev/"
 
@@ -650,10 +654,10 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 			return "", 0, fmt.Errorf("%w: %s", errNotFound, msg)
 		}
 		kind := errAPI
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		// Not 403: API Gateway also sends it for unknown routes and WAF blocks.
+		if resp.StatusCode == http.StatusUnauthorized {
 			kind = errAuth
-		case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
+		} else if retryableStatus(resp.StatusCode) {
 			kind = errUnavailable
 		}
 		return "", 0, fmt.Errorf("%w: %s", kind, msg)
@@ -661,7 +665,10 @@ func fetchDownloadLink(apiKey, relPath string) (string, int64, error) {
 
 	var successResp APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&successResp); err != nil {
-		return "", 0, fmt.Errorf("invalid json: %v", err)
+		return "", 0, fmt.Errorf("invalid json: %w", err)
+	}
+	if successResp.DownloadURL == "" {
+		return "", 0, fmt.Errorf("%w: no download_url in response", errAPI)
 	}
 
 	return successResp.DownloadURL, successResp.FileSize, nil
@@ -680,7 +687,7 @@ func downloadStream(url, fullPath string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 500 {
+	if retryableStatus(resp.StatusCode) {
 		return fmt.Errorf("%w: status %d", errUnavailable, resp.StatusCode)
 	}
 	if resp.StatusCode != 200 {
@@ -688,25 +695,32 @@ func downloadStream(url, fullPath string) error {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 	// Download to a temporary file so an interrupted transfer never leaves a
 	// truncated .parquet that the "already exists" check would skip forever.
 	tmpPath := fullPath + ".part"
 	file, err := os.Create(tmpPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 
 	if _, err := io.Copy(file, resp.Body); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmpPath)
+		// Only the write side returns *fs.PathError; read errors come from the network.
+		if _, ok := errors.AsType[*fs.PathError](err); ok {
+			return fmt.Errorf("%w: %w", errDisk, err)
+		}
 		return err
 	}
 	if err := file.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return fmt.Errorf("%w: %w", errDisk, err)
 	}
 
-	return os.Rename(tmpPath, fullPath)
+	if err := os.Rename(tmpPath, fullPath); err != nil {
+		return fmt.Errorf("%w: %w", errDisk, err)
+	}
+	return nil
 }
