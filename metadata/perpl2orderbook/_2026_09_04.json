@@ -1,0 +1,21 @@
+{
+  "bitnomial": [
+    "aave_usd",
+    "ada_usd",
+    "avax_usd",
+    "bch_usd",
+    "btc_usd",
+    "doge_usd",
+    "dot_usd",
+    "eth_usd",
+    "hbar_usd",
+    "link_usd",
+    "ltc_usd",
+    "shib_usd",
+    "sol_usd",
+    "trx_usd",
+    "xlm_usd",
+    "xrp_usd",
+    "xtz_usd"
+  ]
+}
