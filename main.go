@@ -318,6 +318,11 @@ func runDayMode(start, end time.Time, configRules []ConfigRule) {
 			for _, ex := range exchanges {
 				if availablePairs, ok := activeConfig[ex]; ok {
 					for _, usrPair := range tokens {
+						// HACK: redstonelive feeds are stored as <feed>_usd; let users
+						// pass bare feed ids (btc, eth) for this exchange only.
+						if ex == "redstonelive" && !strings.HasSuffix(usrPair, "_usd") {
+							usrPair += "_usd"
+						}
 						if slices.Contains(availablePairs, usrPair) {
 							jobs = append(jobs, Job{
 								Exchange: ex,
